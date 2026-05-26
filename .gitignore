@@ -1,0 +1,13 @@
+# Segredos — nunca commitar
+.env
+
+# Dados brutos (Excel do ERP)
+dados/
+
+# Saídas geradas
+saidas/
+
+# Cache Python
+__pycache__/
+*.pyc
+*.pyo

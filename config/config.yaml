@@ -1,0 +1,105 @@
+# ============================================================
+#  KION DENTAL — Alerta Diário de Churn
+#  Edite este arquivo para configurar o sistema
+# ============================================================
+
+# ----------------------------------------------------------
+#  MODO TESTE
+#  true  → todos os e-mails vão apenas para emails_teste
+#  false → e-mails vão para cada responsável de verdade
+# ----------------------------------------------------------
+modo_teste: true
+emails_teste:
+  - gabriel.araujo@kiondental.tech
+  - fabio.merlo@kiondental.tech
+
+# ----------------------------------------------------------
+#  SMTP — Servidor de envio
+#  Para Office 365 use: smtp.office365.com / porta 587
+#  Preencha usuario e senha do analytics@kiondental.tech
+# ----------------------------------------------------------
+smtp:
+  servidor: smtp.office365.com
+  porta: 587
+  usuario: analytics@kiondental.tech
+  senha: "PREENCHA_AQUI"
+
+# ----------------------------------------------------------
+#  REMETENTE
+# ----------------------------------------------------------
+remetente:
+  nome: Analytics Kion Dental
+  email: analytics@kiondental.tech
+
+# ----------------------------------------------------------
+#  GESTOR COMERCIAL — recebe o consolidado
+# ----------------------------------------------------------
+gestor:
+  nome: Bruno Garcia
+  email: bruno.garcia@kiondental.tech
+
+# ----------------------------------------------------------
+#  RESPONSÁVEIS POR TERRITÓRIO
+#  Preencha os e-mails reais antes de sair do modo teste
+# ----------------------------------------------------------
+territorios:
+  IS1:
+    nome: Leticia
+    email: leticia@kiondental.tech
+  IS2:
+    nome: Luana
+    email: luana@kiondental.tech
+  IS3:
+    nome: Nathalia
+    email: nathalia@kiondental.tech
+  T1:
+    nome: Claudia
+    email: claudia@kiondental.tech
+  T2:
+    nome: Marcio
+    email: marcio@kiondental.tech
+  T3:
+    nome: Claudio
+    email: claudio@kiondental.tech
+  T4:
+    nome: Denis
+    email: denis@kiondental.tech
+  T5:
+    nome: Denise
+    email: denise@kiondental.tech
+  T6:
+    nome: Marina
+    email: marina@kiondental.tech
+
+# ----------------------------------------------------------
+#  CAMINHOS DOS ARQUIVOS
+#  Share de rede: \\kion-ad\KionStorage\ANALYTICS\dados
+#  No Docker os arquivos ficam em /app/dados/ (volume montado)
+#  Localmente ficam em C:\KionDental\dados\
+#  Sempre salve os exports do ERP com esses nomes exatos:
+# ----------------------------------------------------------
+caminhos:
+  clientes:       dados/clientes.xlsx
+  producao_2025:  dados/producao_2025.xlsx
+  producao_2026:  dados/producao_2026.xlsx
+  logs:           saidas/logs
+
+# ----------------------------------------------------------
+#  THRESHOLDS DE RISCO
+#  Ajuste conforme experiência do time
+# ----------------------------------------------------------
+thresholds:
+  alto_queda_pct:    20    # queda >= 20% vs média 12M
+  alto_meses_min:     2    # E >= 2 meses consecutivos em queda
+  medio_queda_pct:   10    # queda >= 10% vs média 12M
+
+# ----------------------------------------------------------
+#  TABELAS DE PREÇO PRIORITÁRIAS (e-mail do gestor)
+#  Clientes dessas tabelas sempre aparecem no consolidado
+# ----------------------------------------------------------
+tabelas_prioritarias:
+  - ELITE (2026)
+  - PREMIUM (2026)
+  - FRANQUIA SELECT (2026)
+  - CLINICAS INTELIGENTES (2026)
+  - KLC (2026)

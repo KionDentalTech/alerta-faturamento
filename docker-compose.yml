@@ -1,0 +1,22 @@
+version: "3.9"
+
+services:
+  alerta-faturamento:
+    build: .
+    container_name: kion-alerta-faturamento
+    restart: always
+    env_file: .env                          # contém SMTP_SENHA
+    environment:
+      - TZ=America/Sao_Paulo
+      - KION_BASE=/app
+    volumes:
+      # Share de rede: \\kion-ad\KionStorage\ANALYTICS\dados
+      # Montado no host Linux via: sudo mount -t cifs //kion-ad/KionStorage /mnt/kion-storage ...
+      - /mnt/kion-storage/ANALYTICS/dados:/app/dados:ro
+      # Logs persistidos fora do container
+      - /var/log/kion:/app/saidas/logs
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"

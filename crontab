@@ -1,0 +1,7 @@
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
+KION_BASE=/app
+
+# Alerta de faturamento — segunda a sexta às 10h (America/Sao_Paulo já no container)
+0 10 * * 1-5 root cd /app && python scripts/alerta_faturamento.py >> /app/saidas/logs/cron.log 2>&1
+
