@@ -34,7 +34,11 @@ df = pd.merge(df_fat, df_c, on="Cliente", how="left")
 mes_atual = "mai 2026"
 janela    = [m for m in JANELA_12M if m in df.columns]
 
-df["media_12m"]    = df[janela].mean(axis=1)
+def mediana_sem_zeros(row):
+    valores = [row[m] for m in janela if row.get(m, 0) > 0]
+    return float(np.median(valores)) if valores else 0.0
+
+df["media_12m"] = df.apply(mediana_sem_zeros, axis=1)
 df["mes_atual"]    = df[mes_atual].astype(float)
 df["variacao_pct"] = ((df["mes_atual"] - df["media_12m"])
                        / df["media_12m"].replace(0, np.nan) * 100)
@@ -146,15 +150,14 @@ CSS = """
 
 # ── helpers ──
 def narrativa(r):
-    meses_txt = f"{int(r['meses_queda'])} {'mês' if r['meses_queda'] == 1 else 'meses'} seguidos"
+    meses_txt = f"{int(r['meses_queda'])} {'mês' if r['meses_queda'] == 1 else 'meses'} consecutivos"
     return (
         f"<em style='color:#5A5A5A;font-size:11px;line-height:1.7;display:block;margin-top:4px'>"
-        f"Costumava gerar <strong>R$ {r['media_12m']:,.0f}/m&ecirc;s</strong>. "
-        f"Hoje est&aacute; em <strong>R$ {r['mes_atual']:,.0f}</strong>. "
-        f"Queda de <strong style='color:#c0392b'>{abs(r['variacao_pct']):.0f}%</strong>, "
-        f"h&aacute; <strong>{meses_txt}</strong>. "
-        f"Isso representa <strong style='color:#c0392b'>R$ {r['impacto_rs']:,.0f}/m&ecirc;s</strong> "
-        f"que a Kion parou de receber desse cliente."
+        f"Mediana hist&oacute;rica: <strong>R$ {r['media_12m']:,.0f}/m&ecirc;s</strong>. "
+        f"No m&ecirc;s atual faturou <strong>R$ {r['mes_atual']:,.0f}</strong> "
+        f"&mdash; <strong style='color:#c0392b'>{abs(r['variacao_pct']):.0f}% abaixo do hist&oacute;rico</strong>. "
+        f"Tend&ecirc;ncia de queda h&aacute; <strong>{meses_txt}</strong>. "
+        f"Impacto mensal para a Kion: <strong style='color:#c0392b'>-R$ {r['impacto_rs']:,.0f}</strong>."
         f"</em>"
     )
 
