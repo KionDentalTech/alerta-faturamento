@@ -145,6 +145,20 @@ CSS = """
 """
 
 # ── helpers ──
+def narrativa(r):
+    meses_txt = f"{int(r['meses_queda'])} {'mês' if r['meses_queda'] == 1 else 'meses'} seguidos"
+    return (
+        f"<em style='color:#5A5A5A;font-size:11px;line-height:1.7;display:block;margin-top:4px'>"
+        f"Costumava gerar <strong>R$ {r['media_12m']:,.0f}/m&ecirc;s</strong>. "
+        f"Hoje est&aacute; em <strong>R$ {r['mes_atual']:,.0f}</strong>. "
+        f"Queda de <strong style='color:#c0392b'>{abs(r['variacao_pct']):.0f}%</strong>, "
+        f"h&aacute; <strong>{meses_txt}</strong>. "
+        f"Isso representa <strong style='color:#c0392b'>R$ {r['impacto_rs']:,.0f}/m&ecirc;s</strong> "
+        f"que a Kion parou de receber desse cliente."
+        f"</em>"
+    )
+
+
 def bloco(df_g, nivel, acao, emoji):
     sub = df_g[df_g["risco"] == nivel].sort_values("impacto_rs", ascending=False)
     if sub.empty:
@@ -154,8 +168,11 @@ def bloco(df_g, nivel, acao, emoji):
         tabela = r["tabela"] if pd.notna(r["tabela"]) else ""
         rows += f"""
         <tr>
-          <td><strong>{r['Cliente']}</strong><br>
-              <small style='color:#888'>{tabela}</small></td>
+          <td>
+            <strong>{r['Cliente']}</strong><br>
+            <small style='color:#8D8E8F'>{tabela}</small>
+            {narrativa(r)}
+          </td>
           <td>R$ {r['mes_atual']:,.0f}</td>
           <td>R$ {r['media_12m']:,.0f}</td>
           <td class='neg'>{r['variacao_pct']:+.0f}%</td>

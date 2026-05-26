@@ -197,6 +197,20 @@ def _tabela_html(df_grupo, colunas, headers):
     </table>"""
 
 
+def _narrativa(r):
+    meses_txt = f"{int(r['meses_queda'])} {'mês' if r['meses_queda'] == 1 else 'meses'} seguidos"
+    return (
+        f"<em style='color:#5A5A5A;font-size:11px;line-height:1.6'>"
+        f"Costumava gerar <strong>R$ {r['media_12m']:,.0f}/m&ecirc;s</strong>. "
+        f"Hoje est&aacute; em <strong>R$ {r['mes_atual']:,.0f}</strong>. "
+        f"Queda de <strong style='color:#c0392b'>{abs(r['variacao_pct']):.0f}%</strong>, "
+        f"h&aacute; <strong>{meses_txt}</strong>. "
+        f"Isso representa <strong style='color:#c0392b'>R$ {r['impacto_rs']:,.0f}/m&ecirc;s</strong> "
+        f"que a Kion parou de receber desse cliente."
+        f"</em>"
+    )
+
+
 def _bloco_risco(df_terr, nivel, label_acao):
     grupo = df_terr[df_terr["risco"] == nivel].sort_values("impacto_rs", ascending=False)
     if grupo.empty:
@@ -204,23 +218,27 @@ def _bloco_risco(df_terr, nivel, label_acao):
     emoji = EMOJI.get(nivel, "")
     rows = ""
     for _, r in grupo.iterrows():
+        tabela = r['tabela'] if pd.notna(r['tabela']) else ''
         rows += f"""
         <tr>
-          <td><strong>{r['Cliente']}</strong><br>
-              <small>{r['tabela'] if pd.notna(r['tabela']) else ''}</small></td>
+          <td>
+            <strong>{r['Cliente']}</strong><br>
+            <small style='color:#8D8E8F'>{tabela}</small><br>
+            {_narrativa(r)}
+          </td>
           <td>R$ {r['mes_atual']:,.0f}</td>
           <td>R$ {r['media_12m']:,.0f}</td>
-          <td style="color:#c0392b"><strong>{r['variacao_pct']:+.0f}%</strong></td>
+          <td class='neg'><strong>{r['variacao_pct']:+.0f}%</strong></td>
           <td>{int(r['meses_queda'])}m</td>
-          <td style="color:#c0392b">-R$ {r['impacto_rs']:,.0f}</td>
+          <td class='neg'>-R$ {r['impacto_rs']:,.0f}</td>
         </tr>"""
     return f"""
-    <h3 style="margin-top:24px">{emoji} {nivel} — {label_acao}</h3>
+    <h3>{emoji} {nivel} &mdash; {label_acao}</h3>
     <table>
       <thead>
         <tr>
-          <th>Cliente</th><th>MRR Atual</th><th>Média 12M</th>
-          <th>Variação</th><th>Meses queda</th><th>Impacto</th>
+          <th>Cliente</th><th>MRR Atual</th><th>M&eacute;dia 12M</th>
+          <th>Varia&ccedil;&atilde;o</th><th>Meses queda</th><th>Impacto/m&ecirc;s</th>
         </tr>
       </thead>
       <tbody>{rows}</tbody>
