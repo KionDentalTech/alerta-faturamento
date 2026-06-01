@@ -1,14 +1,21 @@
 # ============================================================
-#  KION DENTAL — Alerta Diário de Churn
+#  KION DENTAL — Alerta Diário de Faturamento
 #  Edite este arquivo para configurar o sistema
 # ============================================================
+
+# ----------------------------------------------------------
+#  CONTROLE DE DISPARO
+#  ativo: false → cron roda mas NÃO envia e-mails (pausa segura)
+#  ativo: true  → dispara normalmente
+# ----------------------------------------------------------
+ativo: false
 
 # ----------------------------------------------------------
 #  MODO TESTE
 #  true  → todos os e-mails vão apenas para emails_teste
 #  false → e-mails vão para cada responsável de verdade
 # ----------------------------------------------------------
-modo_teste: true
+modo_teste: false
 emails_teste:
   - gabriel.araujo@kiondental.tech
   - fabio.merlo@kiondental.tech

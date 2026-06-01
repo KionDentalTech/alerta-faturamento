@@ -1051,8 +1051,7 @@ def gerar_relatorio_territorio(nome_resp, codigo, df_terr, mes_ref, cfg, modo_te
     total_casos   = int(df_terr.get("casos_novos_atual", pd.Series([0])).sum())
     casos_proj    = int(df_terr.get("casos_projetados", pd.Series([0])).sum())
 
-    banner = (f'<div class="banner">&#9888; MODO TESTE — Em produção este relatório vai para {nome_resp}</div>'
-              if modo_teste else "")
+    banner = ""  # banner de teste removido
 
     blocos = (
         _bloco_risco_relatorio(df_terr, "ALTO",    "LIGAR HOJE") +
@@ -1098,8 +1097,7 @@ def gerar_relatorio_gestor(df_ativos, mes_ref, cfg, modo_teste):
     n_medio       = (df_ativos["risco"] == "MÉDIO").sum()
     n_atenc       = (df_ativos["risco"] == "ATENÇÃO").sum()
 
-    banner = ('<div class="banner">&#9888; MODO TESTE — Em produção este relatório vai para Bruno Garcia</div>'
-              if modo_teste else "")
+    banner = ""  # banner de teste removido
 
     # Tabela de resumo por território
     linhas_terr = ""
@@ -1178,8 +1176,7 @@ def _corpo_simples(titulo, subtitulo, mes_ref, fat_total, fat_proj,
         f"</p>"
         if nome_arquivo else ""
     )
-    banner = (f"<div class='banner'>&#9888; MODO TESTE &mdash; {banner_txt}</div>"
-              if modo_teste else "")
+    banner = ""  # banner de teste removido
     return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8">{CSS}</head><body>
 <div class='wrapper'>
@@ -1421,6 +1418,13 @@ def main():
     logging.info(f"  Kion Dental — Alerta Faturamento  {'(MODO TESTE)' if modo_teste else ''}")
     logging.info(f"  {datetime.now().strftime('%d/%m/%Y %H:%M')}  |  dry-run={DRY_RUN}  |  preview={PREVIEW}")
     logging.info("=" * 55)
+
+    # Verificar se o disparo está ativo
+    if not cfg.get("ativo", True) and not PREVIEW and not DRY_RUN:
+        logging.info("  ⏸  Sistema PAUSADO (ativo: false no config.yaml) — nenhum e-mail enviado.")
+        logging.info("  Para ativar: altere 'ativo: true' no config/config.yaml")
+        logging.info("=" * 55)
+        return
 
     # 1. Ler dados
     df_cli, df_2025, df_2026 = ler_dados(cfg)
