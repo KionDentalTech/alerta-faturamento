@@ -6,38 +6,55 @@ Uso:
     python alerta_faturamento.py            → roda normalmente
     python alerta_faturamento.py --dry-run  → processa mas não envia e-mails (só loga)
 
-Variáveis de ambiente:
-    SMTP_SENHA   → senha do analytics@kiondental.tech (obrigatório em produção)
-    KION_BASE    → caminho base do projeto (padrão: /app em Docker, C:\\KionDental local)
+Variáveis de ambiente (obrigatórias em produção — defina no .env):
+    GRAPH_TENANT_ID     → ID do diretório (tenant) no Entra ID
+    GRAPH_CLIENT_ID     → ID do aplicativo registrado no Entra ID
+    GRAPH_CLIENT_SECRET → segredo do cliente (client secret)
+    KION_BASE           → caminho base do projeto (padrão: /app em Docker, C:\\KionDental local)
+
+Métricas calculadas por cliente:
+    Faturamento: MRR real, projeção mês, mediana 12M, variação %, meses consecutivos, impacto R$
+    Casos novos: total mês, projeção mês, mediana 12M, variação %, meses consecutivos
+    Qualidade:   % ajustes, % repetições (alertas quando acima de 20%)
+    Financeiro:  status (Ativo/Bloqueado/Inativo) e motivo do bloqueio
 """
 
-import pandas as pd
-import numpy as np
-import yaml
-import smtplib
-import logging
-import sys
+import base64
+import glob
 import os
+import sys
+import logging
 from datetime import datetime
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
+
+import numpy as np
+import pandas as pd
+import requests
+import yaml
 
 # ─────────────────────────────────────────────
 #  CONFIGURAÇÃO
 # ─────────────────────────────────────────────
 
-# Em Docker: KION_BASE=/app  |  Local Windows: C:\KionDental
 BASE_DIR    = os.environ.get("KION_BASE", r"C:\KionDental")
 CONFIG_PATH = os.path.join(BASE_DIR, "config", "config.yaml")
 DRY_RUN     = "--dry-run" in sys.argv
+PREVIEW     = "--preview" in sys.argv
+
+# --simdate=YYYY-MM-DD  → simula execução em outra data (para testes/previews)
+SIM_DATE: pd.Timestamp | None = None
+for _arg in sys.argv:
+    if _arg.startswith("--simdate="):
+        SIM_DATE = pd.Timestamp(_arg.split("=", 1)[1])
+
 
 def carregar_config():
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
-    # Resolve caminhos relativos ao BASE_DIR
     for chave in ["clientes", "producao_2025", "producao_2026", "logs"]:
         cfg["caminhos"][chave] = os.path.join(BASE_DIR, cfg["caminhos"][chave])
+    cfg["caminhos"]["pedidos"] = os.path.join(BASE_DIR, cfg["caminhos"]["pedidos"])
     return cfg
+
 
 # ─────────────────────────────────────────────
 #  LOGGING
@@ -45,52 +62,231 @@ def carregar_config():
 
 def configurar_log(log_dir):
     os.makedirs(log_dir, exist_ok=True)
-    hoje = datetime.now().strftime("%Y-%m-%d")
+    hoje    = datetime.now().strftime("%Y-%m-%d")
     log_file = os.path.join(log_dir, f"alerta_{hoje}.log")
 
     console = logging.StreamHandler(sys.stdout)
     console.stream = open(sys.stdout.fileno(), mode="w",
                           encoding="utf-8", buffering=1, closefd=False)
-
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
-        handlers=[
-            logging.FileHandler(log_file, encoding="utf-8"),
-            console,
-        ],
+        handlers=[logging.FileHandler(log_file, encoding="utf-8"), console],
     )
+
+
+# ─────────────────────────────────────────────
+#  CONSTANTES DE PERÍODO
+# ─────────────────────────────────────────────
+
+MESES_MAP = {
+    "jan": 1, "fev": 2, "mar": 3, "abr": 4, "mai": 5, "jun": 6,
+    "jul": 7, "ago": 8, "set": 9, "out": 10, "nov": 11, "dez": 12,
+}
+
+MESES_2025 = ["abr 2025", "mai 2025", "jun 2025", "jul 2025", "ago 2025",
+               "set 2025", "out 2025", "nov 2025", "dez 2025"]
+
+MESES_2026 = ["jan 2026", "fev 2026", "mar 2026", "abr 2026", "mai 2026",
+               "jun 2026"]
+
+JANELA_12M = ["jun 2025", "jul 2025", "ago 2025", "set 2025", "out 2025",
+               "nov 2025", "dez 2025", "jan 2026", "fev 2026", "mar 2026",
+               "abr 2026", "mai 2026"]  # atualizado dinamicamente em processar()
+
+MESES_NOMES = {v: k for k, v in MESES_MAP.items()}
+
+
+def calcular_janela_12m(mes_atual_str: str) -> list:
+    """Janela de 12 meses terminando em mes_atual_str (rolling, não hardcoded)."""
+    periodo = mes_str_to_period(mes_atual_str)
+    return [f"{MESES_NOMES[(periodo - i).month]} {(periodo - i).year}"
+            for i in range(11, -1, -1)]
+
+
+def mes_str_to_period(mes_str: str) -> pd.Period:
+    """Converte 'jun 2025' → pd.Period('2025-06', 'M')."""
+    p = mes_str.strip().split()
+    return pd.Period(f"{p[1]}-{MESES_MAP[p[0]]:02d}", "M")
+
+
+def dias_uteis_mes(ano: int, mes: int) -> int:
+    """Total de dias úteis (seg–sex) no mês."""
+    inicio = pd.Timestamp(ano, mes, 1)
+    fim    = inicio + pd.offsets.MonthEnd(0)
+    return len(pd.bdate_range(inicio, fim))
+
+
+def dias_uteis_ate(ano: int, mes: int, ate: pd.Timestamp) -> int:
+    """Dias úteis decorridos do início do mês até `ate` (inclusive)."""
+    inicio  = pd.Timestamp(ano, mes, 1)
+    fim_mes = inicio + pd.offsets.MonthEnd(0)
+    ate_clamped = min(ate, fim_mes)
+    if ate_clamped < inicio:
+        return 0
+    return len(pd.bdate_range(inicio, ate_clamped))
+
 
 # ─────────────────────────────────────────────
 #  LEITURA DOS DADOS
 # ─────────────────────────────────────────────
 
 def ler_dados(cfg):
-    logging.info("Lendo arquivos Excel...")
-
+    logging.info("Lendo arquivos de faturamento...")
     df_cli  = pd.read_excel(cfg["caminhos"]["clientes"])
     df_2025 = pd.read_excel(cfg["caminhos"]["producao_2025"], sheet_name="Dados")
     df_2026 = pd.read_excel(cfg["caminhos"]["producao_2026"], sheet_name="Dados")
-
     logging.info(f"  clientes.xlsx       → {len(df_cli):,} linhas")
     logging.info(f"  producao_2025.xlsx  → {len(df_2025):,} linhas")
     logging.info(f"  producao_2026.xlsx  → {len(df_2026):,} linhas")
-
     return df_cli, df_2025, df_2026
 
+
+def ler_pedidos(pasta: str) -> pd.DataFrame:
+    """
+    Carrega e consolida todos os arquivos xlsx da pasta de pedidos.
+    Retorna DataFrame limpo com colunas padronizadas.
+    """
+    arquivos = sorted(glob.glob(os.path.join(pasta, "*.xlsx")))
+    if not arquivos:
+        logging.warning("  Pasta de pedidos sem arquivos xlsx — métricas de casos desativadas.")
+        return pd.DataFrame()
+
+    logging.info(f"Lendo pedidos ({len(arquivos)} arquivos)...")
+    dfs = []
+    for arq in arquivos:
+        try:
+            df = pd.read_excel(arq, dtype={"Nº pedido": str})
+            dfs.append(df)
+            logging.info(f"  {os.path.basename(arq):30s} → {len(df):,} linhas")
+        except Exception as exc:
+            logging.warning(f"  Erro em {os.path.basename(arq)}: {exc}")
+
+    if not dfs:
+        return pd.DataFrame()
+
+    df_all = pd.concat(dfs, ignore_index=True)
+
+    # Coluna Repetição|Ajuste
+    col_ra = next((c for c in df_all.columns if "Repeti" in c), None)
+    df_all["rep_ajuste"] = df_all[col_ra].fillna("").astype(str).str.strip().str.upper() if col_ra else ""
+
+    # Parse data de entrada (formato brasileiro DD/MM/YYYY)
+    df_all["data_entrada"] = pd.to_datetime(
+        df_all.get("Data de entrada"), dayfirst=True, errors="coerce"
+    )
+    df_all["mes_period"] = df_all["data_entrada"].dt.to_period("M")
+
+    # Limpar Nº pedido — remove linhas sem pedido (itens filhos)
+    df_all["Nº pedido"] = df_all["Nº pedido"].astype(str).str.strip()
+    df_all = df_all[~df_all["Nº pedido"].isin(["", "nan", "NaN"])].copy()
+
+    # Valor total numérico
+    df_all["valor_total"] = pd.to_numeric(df_all.get("Valor total"), errors="coerce").fillna(0)
+
+    # Status produção
+    df_all["status_pedido"] = df_all.get("Status", pd.Series("")).astype(str).str.strip()
+
+    # Cliente normalizado
+    df_all["Cliente"] = df_all["Cliente"].astype(str).str.strip()
+
+    # Excluir pedidos cancelados para contagem de casos
+    df_all = df_all[df_all["status_pedido"] != "Cancelado"].copy()
+
+    # Deduplica por Nº pedido (múltiplas linhas de serviço por pedido)
+    df_all = df_all.drop_duplicates(subset=["Nº pedido"], keep="first")
+
+    # Tipo do pedido
+    df_all["tipo"] = "novo"
+    df_all.loc[df_all["rep_ajuste"] == "R", "tipo"] = "repeticao"
+    df_all.loc[df_all["rep_ajuste"] == "A", "tipo"] = "ajuste"
+
+    logging.info(f"  Total pedidos consolidados: {len(df_all):,} (únicos, não cancelados)")
+    return df_all
+
+
 # ─────────────────────────────────────────────
-#  PROCESSAMENTO
+#  MÉTRICAS DE PEDIDOS
 # ─────────────────────────────────────────────
 
-MESES_2025 = ["abr 2025","mai 2025","jun 2025","jul 2025","ago 2025",
-               "set 2025","out 2025","nov 2025","dez 2025"]
+def calcular_metricas_pedidos(df_pedidos: pd.DataFrame, janela: list) -> pd.DataFrame:
+    """
+    Retorna DataFrame indexado por Cliente com colunas:
+        casos_{mes}   → casos novos no mês
+        rep_pct_{mes} → % repetições no mês
+        adj_pct_{mes} → % ajustes no mês
+    """
+    if df_pedidos.empty:
+        return pd.DataFrame()
 
-MESES_2026 = ["jan 2026","fev 2026","mar 2026","abr 2026","mai 2026"]
+    periodos = {m: mes_str_to_period(m) for m in janela}
+    clientes = df_pedidos["Cliente"].unique()
+    result   = pd.DataFrame(index=clientes)
+    result.index.name = "Cliente"
 
-JANELA_12M = ["jun 2025","jul 2025","ago 2025","set 2025","out 2025",
-               "nov 2025","dez 2025","jan 2026","fev 2026","mar 2026",
-               "abr 2026","mai 2026"]
+    for mes_str, periodo in periodos.items():
+        dm = df_pedidos[df_pedidos["mes_period"] == periodo]
+        if dm.empty:
+            result[f"casos_{mes_str}"]   = 0
+            result[f"rep_pct_{mes_str}"] = 0.0
+            result[f"adj_pct_{mes_str}"] = 0.0
+            continue
 
+        grp   = dm.groupby("Cliente")
+        total = grp["Nº pedido"].count()
+        novos = grp["tipo"].apply(lambda x: (x == "novo").sum())
+        reps  = grp["tipo"].apply(lambda x: (x == "repeticao").sum())
+        adjs  = grp["tipo"].apply(lambda x: (x == "ajuste").sum())
+
+        result[f"casos_{mes_str}"]   = novos.reindex(result.index, fill_value=0)
+        result[f"rep_pct_{mes_str}"] = (
+            (reps / total.replace(0, np.nan) * 100)
+            .reindex(result.index, fill_value=0).round(1)
+        )
+        result[f"adj_pct_{mes_str}"] = (
+            (adjs / total.replace(0, np.nan) * 100)
+            .reindex(result.index, fill_value=0).round(1)
+        )
+
+    return result.reset_index()
+
+
+def calcular_projecao(df_pedidos: pd.DataFrame, mes_str: str, hoje: pd.Timestamp):
+    """
+    Calcula faturamento projetado e casos novos projetados para um mês em andamento.
+    Retorna (serie_fat_projetado, serie_casos_projetados) indexadas por Cliente.
+    """
+    if df_pedidos.empty:
+        return pd.Series(dtype=float), pd.Series(dtype=float)
+
+    periodo = mes_str_to_period(mes_str)
+    ano, mes = periodo.year, periodo.month
+
+    du_total    = dias_uteis_mes(ano, mes)
+    du_ate_hoje = dias_uteis_ate(ano, mes, hoje)
+
+    if du_ate_hoje == 0:
+        return pd.Series(dtype=float), pd.Series(dtype=float)
+
+    fator = du_total / du_ate_hoje
+    dm    = df_pedidos[df_pedidos["mes_period"] == periodo]
+
+    # Faturamento: soma de Valor total de pedidos Finalizados
+    dm_fat  = dm[dm["status_pedido"] == "Finalizado"]
+    fat_acum = dm_fat.groupby("Cliente")["valor_total"].sum()
+    fat_proj = (fat_acum * fator).round(0)
+
+    # Casos novos: contagem de pedidos novos (sem R/A)
+    dm_novos   = dm[dm["tipo"] == "novo"]
+    casos_acum = dm_novos.groupby("Cliente")["Nº pedido"].count()
+    casos_proj = (casos_acum * fator).round(0)
+
+    return fat_proj, casos_proj
+
+
+# ─────────────────────────────────────────────
+#  PROCESSAMENTO FATURAMENTO
+# ─────────────────────────────────────────────
 
 def detectar_mes_atual(df_2026):
     """Retorna o mês mais recente com pelo menos 100 clientes faturando."""
@@ -100,13 +296,17 @@ def detectar_mes_atual(df_2026):
     return MESES_2026[-1]
 
 
-def meses_consecutivos_queda(row, janela, mes_atual):
-    """Conta meses seguidos de queda antes do mês atual."""
-    idx = janela.index(mes_atual)
-    meses_anteriores = list(reversed(janela[:idx]))
+def meses_consecutivos_queda(row, cols_janela: list, col_atual: str) -> int:
+    """Conta meses seguidos de queda antes do mês atual (genérico para qualquer conjunto de colunas)."""
+    if col_atual not in cols_janela:
+        return 0
+    idx              = cols_janela.index(col_atual)
+    meses_anteriores = list(reversed(cols_janela[:idx]))
+    val_atual        = row.get(col_atual, 0)
     count = 0
-    for m in meses_anteriores:
-        if row.get(m, 0) > 0 and row[mes_atual] < row[m]:
+    for col in meses_anteriores:
+        val = row.get(col, 0)
+        if val > 0 and val_atual < val:
             count += 1
         else:
             break
@@ -117,8 +317,7 @@ def calcular_nivel_risco(row, cfg, mes_atual):
     th = cfg["thresholds"]
     if row["media_12m"] == 0 or row[mes_atual] == 0:
         return "SEM HISTÓRICO"
-    if (row["variacao_pct"] <= -th["alto_queda_pct"]
-            and row["meses_queda"] >= th["alto_meses_min"]):
+    if row["variacao_pct"] <= -th["alto_queda_pct"] and row["meses_queda"] >= th["alto_meses_min"]:
         return "ALTO"
     if row["variacao_pct"] <= -th["medio_queda_pct"]:
         return "MÉDIO"
@@ -127,58 +326,116 @@ def calcular_nivel_risco(row, cfg, mes_atual):
     return "ESTÁVEL"
 
 
-def processar(df_cli, df_2025, df_2026, cfg):
+def processar(df_cli, df_2025, df_2026, df_pedidos, cfg):
     logging.info("Processando dados...")
+    hoje = SIM_DATE if SIM_DATE is not None else pd.Timestamp.now()
+    if SIM_DATE:
+        logging.info(f"  ⚠️  Data simulada: {hoje.strftime('%d/%m/%Y')}")
 
-    # Meses disponíveis em 2025
+    # ── Faturamento ────────────────────────────────────────────────────────
     meses_25_disp = [m for m in MESES_2025 if m in df_2025.columns]
-
-    # Consolidar faturamento
     df_fat = pd.merge(
         df_2025[["Cliente"] + meses_25_disp],
-        df_2026[["Cliente"] + MESES_2026],
-        on="Cliente", how="outer"
+        df_2026[["Cliente"] + [m for m in MESES_2026 if m in df_2026.columns]],
+        on="Cliente", how="outer",
     ).fillna(0)
 
-    # Join com cadastro de clientes
-    df_cli_limpo = df_cli[["Nome","VENDAS","Tabela de preço","Status"]].copy()
-    df_cli_limpo.columns = ["Cliente","vendas","tabela","status"]
+    # Status financeiro + dados cadastrais
+    df_cli_limpo = df_cli[["Nome", "VENDAS", "Tabela de preço", "Status",
+                            "Motivo de bloqueio"]].copy()
+    df_cli_limpo.columns = ["Cliente", "vendas", "tabela", "status_financeiro",
+                             "motivo_bloqueio"]
 
     df = pd.merge(df_fat, df_cli_limpo, on="Cliente", how="left")
 
-    # Mês atual (mais recente com dados)
     mes_atual = detectar_mes_atual(df_2026)
     logging.info(f"  Mês de referência: {mes_atual}")
 
-    # Janela de 12 meses disponível
-    janela = [m for m in JANELA_12M if m in df.columns]
+    # Janela rolling de 12 meses a partir do mes_atual
+    janela = [m for m in calcular_janela_12m(mes_atual) if m in df.columns]
+    logging.info(f"  Janela 12M: {janela[0]} → {janela[-1]} ({len(janela)} meses)")
 
-    # ── Baseline: mediana dos meses com valor > 0 (exclui zeros) ──
     def mediana_sem_zeros(row):
-        valores = [row[m] for m in janela if row.get(m, 0) > 0]
-        return float(np.median(valores)) if valores else 0.0
+        vals = [row[m] for m in janela if row.get(m, 0) > 0]
+        return float(np.median(vals)) if vals else 0.0
 
-    df["media_12m"]    = df.apply(mediana_sem_zeros, axis=1)   # nome mantido para compatibilidade
-    df["meses_ativos"] = df[janela].apply(lambda r: (r > 0).sum(), axis=1)  # qtd meses com dados
+    df["media_12m"]    = df.apply(mediana_sem_zeros, axis=1)
+    df["meses_ativos"] = df[janela].apply(lambda r: (r > 0).sum(), axis=1)
     df["mes_atual"]    = df[mes_atual].astype(float)
-    df["variacao_pct"] = ((df["mes_atual"] - df["media_12m"])
-                          / df["media_12m"].replace(0, np.nan) * 100)
-    df["meses_queda"]  = df.apply(
-        lambda r: meses_consecutivos_queda(r, janela, mes_atual), axis=1
-    )
-    df["risco"]        = df.apply(
-        lambda r: calcular_nivel_risco(r, cfg, mes_atual), axis=1
-    )
+    df["variacao_pct"] = (df["mes_atual"] - df["media_12m"]) / df["media_12m"].replace(0, np.nan) * 100
+    df["meses_queda"]  = df.apply(lambda r: meses_consecutivos_queda(r, janela, mes_atual), axis=1)
+    df["risco"]        = df.apply(lambda r: calcular_nivel_risco(r, cfg, mes_atual), axis=1)
     df["impacto_rs"]   = (df["media_12m"] - df["mes_atual"]).clip(lower=0)
     df["mes_ref"]      = mes_atual
 
-    # Apenas clientes com faturamento no mês atual
     df_ativos = df[df["mes_atual"] > 0].copy()
 
+    # ── Métricas de pedidos ────────────────────────────────────────────────
+    if not df_pedidos.empty:
+        logging.info("  Calculando métricas de pedidos (casos, ajustes, repetições)...")
+
+        df_metricas = calcular_metricas_pedidos(df_pedidos, janela)
+
+        if not df_metricas.empty:
+            df_ativos = pd.merge(df_ativos, df_metricas, on="Cliente", how="left")
+
+            # Colunas de casos novos por mês
+            casos_cols = [f"casos_{m}" for m in janela if f"casos_{m}" in df_ativos.columns]
+            for c in casos_cols:
+                df_ativos[c] = df_ativos[c].fillna(0).astype(int)
+
+            # Casos novos mês atual
+            col_casos_atual = f"casos_{mes_atual}"
+            df_ativos["casos_novos_atual"] = (
+                df_ativos[col_casos_atual].fillna(0).astype(int)
+                if col_casos_atual in df_ativos.columns else 0
+            )
+
+            # Mediana 12M de casos novos (exclui zeros)
+            def mediana_casos(row):
+                vals = [row[c] for c in casos_cols if row.get(c, 0) > 0]
+                return float(np.median(vals)) if vals else 0.0
+
+            df_ativos["casos_mediana_12m"] = df_ativos.apply(mediana_casos, axis=1)
+
+            # Variação e meses consecutivos de queda em casos
+            df_ativos["casos_var_pct"] = (
+                (df_ativos["casos_novos_atual"] - df_ativos["casos_mediana_12m"])
+                / df_ativos["casos_mediana_12m"].replace(0, np.nan) * 100
+            )
+            df_ativos["casos_meses_queda"] = df_ativos.apply(
+                lambda r: meses_consecutivos_queda(r, casos_cols, col_casos_atual), axis=1
+            )
+
+            # % ajustes e repetições do mês atual
+            col_rep = f"rep_pct_{mes_atual}"
+            col_adj = f"adj_pct_{mes_atual}"
+            df_ativos["rep_pct_atual"] = (
+                df_ativos[col_rep].fillna(0) if col_rep in df_ativos.columns else 0
+            )
+            df_ativos["adj_pct_atual"] = (
+                df_ativos[col_adj].fillna(0) if col_adj in df_ativos.columns else 0
+            )
+        else:
+            for col in ["casos_novos_atual", "casos_mediana_12m", "casos_var_pct",
+                        "casos_meses_queda", "rep_pct_atual", "adj_pct_atual"]:
+                df_ativos[col] = 0
+
+        # ── Projeção do mês atual ──────────────────────────────────────────
+        fat_proj, casos_proj = calcular_projecao(df_pedidos, mes_atual, hoje)
+        df_ativos["fat_projetado"]   = df_ativos["Cliente"].map(fat_proj).fillna(df_ativos["mes_atual"])
+        df_ativos["casos_projetados"] = df_ativos["Cliente"].map(casos_proj).fillna(df_ativos.get("casos_novos_atual", 0))
+
+    else:
+        for col in ["casos_novos_atual", "casos_mediana_12m", "casos_var_pct",
+                    "casos_meses_queda", "rep_pct_atual", "adj_pct_atual"]:
+            df_ativos[col] = 0
+        df_ativos["fat_projetado"]    = df_ativos["mes_atual"]
+        df_ativos["casos_projetados"] = 0
+
     logging.info(f"  Clientes ativos em {mes_atual}: {len(df_ativos):,}")
-    for nivel in ["ALTO","MÉDIO","ATENÇÃO","ESTÁVEL"]:
-        n = (df_ativos["risco"] == nivel).sum()
-        logging.info(f"    {nivel}: {n}")
+    for nivel in ["ALTO", "MÉDIO", "ATENÇÃO", "ESTÁVEL"]:
+        logging.info(f"    {nivel}: {(df_ativos['risco'] == nivel).sum()}")
 
     return df_ativos, mes_atual
 
@@ -190,314 +447,962 @@ def processar(df_cli, df_2025, df_2026, cfg):
 EMOJI = {"ALTO": "🔴", "MÉDIO": "🟡", "ATENÇÃO": "🟢", "ESTÁVEL": "✅"}
 
 
-def _tabela_html(df_grupo, colunas, headers):
-    linhas = ""
-    for _, r in df_grupo.iterrows():
-        linhas += "<tr>" + "".join(f"<td>{r[c]}</td>" for c in colunas) + "</tr>"
-    cabecalho = "".join(f"<th>{h}</th>" for h in headers)
-    return f"""
-    <table>
-      <thead><tr>{cabecalho}</tr></thead>
-      <tbody>{linhas}</tbody>
-    </table>"""
+def _status_badge(r) -> str:
+    status = str(r.get("status_financeiro", "Ativo") or "Ativo").strip()
+    motivo = str(r.get("motivo_bloqueio", "") or "").strip()
+    if status == "Bloqueado":
+        mot = f" · {motivo}" if motivo and motivo != "nan" else ""
+        return (f" <span style='background:#c0392b;color:#fff;font-size:9px;"
+                f"padding:1px 5px;border-radius:3px;font-weight:700'>"
+                f"&#128683; BLOQUEADO{mot}</span>")
+    if status == "Inativo":
+        return (" <span style='background:#bdc3c7;color:#fff;font-size:9px;"
+                "padding:1px 5px;border-radius:3px'>INATIVO</span>")
+    return ""
 
 
-def _narrativa(r):
-    meses_txt = f"{int(r['meses_queda'])} {'mês' if r['meses_queda'] == 1 else 'meses'} consecutivos"
+def _narrativa(r) -> str:
+    """Linha de contexto compacta — sem prose longo."""
+    queda = abs(r["variacao_pct"])
+    meses = int(r["meses_queda"])
     return (
-        f"<em style='color:#5A5A5A;font-size:11px;line-height:1.6'>"
-        f"Mediana hist&oacute;rica: <strong>R$ {r['media_12m']:,.0f}/m&ecirc;s</strong>. "
-        f"No m&ecirc;s atual faturou <strong>R$ {r['mes_atual']:,.0f}</strong> "
-        f"&mdash; <strong style='color:#c0392b'>{abs(r['variacao_pct']):.0f}% abaixo do hist&oacute;rico</strong>. "
-        f"Tend&ecirc;ncia de queda h&aacute; <strong>{meses_txt}</strong>. "
-        f"Impacto mensal para a Kion: <strong style='color:#c0392b'>-R$ {r['impacto_rs']:,.0f}</strong>."
-        f"</em>"
+        f"<span style='font-size:10px;color:#9AA0A6'>"
+        f"{queda:.0f}% abaixo da mediana"
+        f"{f' · {meses}m em queda' if meses > 0 else ''}"
+        f"</span>"
     )
 
 
-def _bloco_risco(df_terr, nivel, label_acao):
+def _bloco_risco(df_terr, nivel, label_acao, show_vendas=False, cfg=None) -> str:
     grupo = df_terr[df_terr["risco"] == nivel].sort_values("impacto_rs", ascending=False)
     if grupo.empty:
         return ""
-    emoji = EMOJI.get(nivel, "")
-    rows = ""
+
+    emoji       = EMOJI.get(nivel, "")
+    tem_pedidos = "casos_novos_atual" in df_terr.columns
+    n           = len(grupo)
+    rows        = ""
+
+    COR = {"ALTO": "#c0392b", "MÉDIO": "#e67e22", "ATENÇÃO": "#27ae60"}
+    cor_nivel = COR.get(nivel, "#00B1D2")
+
     for _, r in grupo.iterrows():
-        tabela = r['tabela'] if pd.notna(r['tabela']) else ''
+        tabela    = str(r.get("tabela") or "")
+        if pd.isna(r.get("tabela")): tabela = ""
+        fat_proj  = float(r.get("fat_projetado") or r["mes_atual"])
+        casos     = int(r.get("casos_novos_atual") or 0)
+        casos_prj = int(r.get("casos_projetados") or casos)
+        casos_med = float(r.get("casos_mediana_12m") or 0)
+        casos_var = r.get("casos_var_pct", None)
+        casos_mq  = int(r.get("casos_meses_queda") or 0)
+        adj_pct   = float(r.get("adj_pct_atual") or 0)
+        rep_pct   = float(r.get("rep_pct_atual") or 0)
+
+        # Variação faturamento
+        vf = r["variacao_pct"]
+        cor_vf  = "#c0392b" if vf < 0 else "#27ae60"
+
+        # Variação casos
+        if casos_var is not None and not pd.isna(casos_var):
+            cor_vc = "#c0392b" if casos_var < -10 else "#27ae60" if casos_var > 5 else "#888"
+            vc_str = f"<span style='color:{cor_vc};font-weight:700'>{casos_var:+.0f}%</span>"
+        else:
+            vc_str = "<span style='color:#ccc'>—</span>"
+
+        # Qualidade
+        adj_cor = "#c0392b" if adj_pct > 20 else "#888"
+        rep_cor = "#c0392b" if rep_pct > 20 else "#888"
+
+        # Sub-linha operacional
+        if tem_pedidos:
+            sub_row = f"""
+        <tr class="op-row">
+          <td style="color:#888;font-style:italic">{tabela}</td>
+          <td><strong style="color:#00B1D2">{casos}</strong>
+              &nbsp;<span style="color:#ccc">|</span>&nbsp;
+              <span style="color:#aaa">proj {casos_prj}</span></td>
+          <td>{casos_prj}</td>
+          <td style="color:#aaa">{casos_med:.0f}</td>
+          <td>{vc_str}</td>
+          <td style="color:#aaa">{casos_mq}m&nbsp;&#8595;</td>
+          <td><span style="color:{adj_cor}">Adj&nbsp;{adj_pct:.0f}%</span>&nbsp;
+              <span style="color:{rep_cor}">Rep&nbsp;{rep_pct:.0f}%</span></td>
+        </tr>"""
+        else:
+            sub_row = ""
+
+        # Coluna de responsável (só no e-mail do gestor)
+        resp_cell = ""
+        if show_vendas and cfg:
+            terr = str(r.get("vendas") or "—")
+            nome_resp = cfg.get("territorios", {}).get(terr, {}).get("nome", terr) if terr != "—" else "—"
+            resp_cell = (
+                f"<td style='color:#555;font-size:11px'>"
+                f"<strong style='color:#00B1D2'>{terr}</strong><br>{nome_resp}</td>"
+            )
+
         rows += f"""
         <tr>
-          <td>
-            <strong>{r['Cliente']}</strong><br>
-            <small style='color:#8D8E8F'>{tabela}</small><br>
+          <td style="padding:9px 10px 5px">
+            <strong style="font-size:12px">{r['Cliente']}</strong>{_status_badge(r)}<br>
             {_narrativa(r)}
           </td>
-          <td>R$ {r['mes_atual']:,.0f}</td>
-          <td>R$ {r['media_12m']:,.0f}</td>
-          <td class='neg'><strong>{r['variacao_pct']:+.0f}%</strong></td>
-          <td>{int(r['meses_queda'])}m</td>
-          <td class='neg'>-R$ {r['impacto_rs']:,.0f}</td>
-        </tr>"""
+          {resp_cell}
+          <td style="font-weight:700">R$&nbsp;{r['mes_atual']:,.0f}</td>
+          <td style="color:#555">R$&nbsp;{fat_proj:,.0f}</td>
+          <td style="color:#888">R$&nbsp;{r['media_12m']:,.0f}</td>
+          <td style="font-weight:700;color:{cor_vf}">{vf:+.0f}%</td>
+          <td style="color:#555">{int(r['meses_queda'])}m</td>
+          <td style="font-weight:700;color:#c0392b">-R$&nbsp;{r['impacto_rs']:,.0f}</td>
+        </tr>{sub_row}"""
+
+    col_resp_th = "<th>Respons&aacute;vel</th>" if show_vendas else ""
+    col_resp_op = "<th style='color:#00B1D2;font-size:10px;font-weight:600'>&nbsp;</th>" if show_vendas else ""
+    cliente_width = "28%" if show_vendas else "34%"
+
     return f"""
-    <h3>{emoji} {nivel} &mdash; {label_acao}</h3>
+    <p class="section-title" style="border-left:3px solid {cor_nivel};padding-left:8px">
+      {emoji}&nbsp;{nivel} &mdash; {label_acao}
+      <span style="font-weight:400;color:#9AA0A6;font-size:10px;margin-left:6px">{n}&nbsp;cliente(s)</span>
+    </p>
     <table>
       <thead>
         <tr>
-          <th>Cliente</th><th>MRR Atual</th><th>Mediana 12M</th>
-          <th>Varia&ccedil;&atilde;o</th><th>Meses queda</th><th>Impacto/m&ecirc;s</th>
+          <th style="width:{cliente_width}">Cliente</th>
+          {col_resp_th}
+          <th>MRR Atual</th>
+          <th>Proj.&nbsp;M&ecirc;s</th>
+          <th>Mediana&nbsp;12M</th>
+          <th>Varia&ccedil;&atilde;o</th>
+          <th>Meses&nbsp;&#8595;</th>
+          <th>Impacto/m&ecirc;s</th>
         </tr>
+        {f'''<tr style="background:#e8f8fd">
+          <th style="color:#00B1D2;font-size:10px;font-weight:600">Tabela&nbsp;de&nbsp;Pre&ccedil;o</th>
+          {col_resp_op}
+          <th style="color:#00B1D2;font-size:10px;font-weight:600">Casos&nbsp;Novos</th>
+          <th style="color:#00B1D2;font-size:10px;font-weight:600">Proj.&nbsp;Casos</th>
+          <th style="color:#00B1D2;font-size:10px;font-weight:600">Med.&nbsp;Casos&nbsp;12M</th>
+          <th style="color:#00B1D2;font-size:10px;font-weight:600">Var.&nbsp;Casos</th>
+          <th style="color:#00B1D2;font-size:10px;font-weight:600">Meses&nbsp;&#8595;</th>
+          <th style="color:#00B1D2;font-size:10px;font-weight:600">Qualidade</th>
+        </tr>''' if tem_pedidos else ''}
       </thead>
       <tbody>{rows}</tbody>
     </table>"""
 
 
-# ── Kion logo arc (SVG inline, compatível com clientes de e-mail modernos) ──
-KION_ARC = (
-    '<svg viewBox="0 0 110 100" width="36" height="32" '
-    'style="vertical-align:middle;margin-right:10px">'
-    '<defs><linearGradient id="kg" x1="0%" y1="0%" x2="100%" y2="0%">'
-    '<stop offset="0%" stop-color="#00F5FF"/>'
-    '<stop offset="100%" stop-color="#FAEB1E"/>'
-    '</linearGradient></defs>'
-    '<path d="M 12 92 A 46 46 0 1 1 98 92" stroke="url(#kg)" '
-    'stroke-width="10" fill="none" stroke-linecap="round"/>'
-    '</svg>'
-)
-
-# ── CSS Kion Brand ──────────────────────────────────────────────────────────
-CSS = """
+# ── CSS moderno para o relatório HTML standalone (anexo) ─────────────────────
+CSS_RELATORIO = """
 <style>
-  body{{margin:0;padding:0;background:#f4f4f4;
-        font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#282828}}
-  .wrapper{{max-width:920px;margin:0 auto;background:#fff}}
-  .kion-header{{background:#282828;padding:16px 24px;
-                display:flex;align-items:center;justify-content:space-between}}
-  .kion-name{{font-size:21px;font-weight:900;letter-spacing:3px;color:#00F5FF}}
-  .kion-sub{{font-size:10px;color:#8D8E8F;letter-spacing:1px}}
-  .kion-tag{{font-size:11px;color:#8D8E8F;text-align:right;line-height:1.5}}
-  .kion-tag strong{{color:#00B1D2}}
-  .kion-bar{{height:4px;background:linear-gradient(90deg,#00F5FF 0%,#00B1D2 50%,#FAEB1E 100%)}}
-  .body-wrap{{padding:22px 26px}}
-  h2{{color:#282828;font-size:16px;margin:0 0 3px;padding-bottom:8px;border-bottom:2px solid #00B1D2}}
-  .subtitle{{color:#8D8E8F;font-size:12px;margin:0 0 16px}}
-  h3{{color:#00B1D2;font-size:13px;margin:26px 0 5px}}
-  table{{border-collapse:collapse;width:100%;margin:4px 0 18px;font-size:12px}}
-  th{{background:#00B1D2;color:#fff;padding:8px 10px;text-align:left;
-      font-size:11px;text-transform:uppercase;letter-spacing:.4px}}
-  td{{padding:7px 10px;border-bottom:1px solid #e8e8e8;vertical-align:top}}
-  tr:nth-child(even) td{{background:#f8fdff}}
-  .resumo{{background:#f0fbff;border-left:4px solid #00F5FF;
-           padding:13px 17px;margin-bottom:20px;border-radius:0 6px 6px 0;line-height:2}}
-  .badge{{display:inline-block;padding:2px 8px;border-radius:12px;
-          font-size:11px;font-weight:bold;margin-right:4px}}
-  .alto{{background:#fde8e8;color:#c0392b}}
-  .medio{{background:#fff8cc;color:#8a6500}}
-  .neg{{color:#c0392b;font-weight:bold}}
-  .banner{{background:#00B1D2;color:#fff;padding:9px 14px;
-           font-weight:bold;border-radius:4px;margin-bottom:16px;font-size:12px}}
-  .kion-footer{{background:#282828;padding:14px 24px}}
-  .kion-footer-inner{{border-top:1px solid #3a3a3a;padding-top:12px;
-                      display:flex;align-items:center;justify-content:space-between}}
-  .footer-left{{font-size:11px;color:#8D8E8F;line-height:1.9}}
-  .footer-left strong{{color:#00F5FF}}
-  .footer-right{{font-size:10px;color:#5A5A5A;text-align:right;line-height:1.8}}
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+  :root{
+    --azul:#00B1D2;--azul-vivo:#00F5FF;--amarelo:#FAEB1E;
+    --cinza-dark:#282828;--vermelho:#c0392b;--laranja:#e67e22;--verde:#27ae60;
+    --bg:#f5f7fa;--card:#fff;--borda:#e9ecef;--texto:#2d3748;--suave:#718096;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Inter',Arial,sans-serif;background:var(--bg);color:var(--texto);font-size:13px}
+  .container{max-width:1100px;margin:0 auto;background:var(--card);box-shadow:0 2px 16px rgba(0,0,0,.08)}
+
+  /* ── Header ── */
+  .rpt-header{background:var(--cinza-dark);padding:16px 28px;display:flex;align-items:center;justify-content:space-between}
+  .rpt-brand{display:flex;align-items:center;gap:12px}
+  .rpt-nome{font-size:22px;font-weight:800;letter-spacing:3px;color:var(--azul-vivo)}
+  .rpt-sub{font-size:10px;color:#8D8E8F;letter-spacing:1px;margin-top:1px}
+  .rpt-tag{font-size:11px;color:#8D8E8F;text-align:right;line-height:1.6}
+  .rpt-tag strong{color:var(--azul)}
+  .rpt-bar{height:4px;background:linear-gradient(90deg,var(--azul-vivo) 0%,var(--azul) 50%,var(--amarelo) 100%)}
+
+  /* ── Corpo ── */
+  .rpt-body{padding:24px 28px}
+  .rpt-title{font-size:16px;font-weight:700;color:var(--cinza-dark);padding-bottom:10px;border-bottom:2px solid var(--azul);margin-bottom:4px}
+  .rpt-subtitle{font-size:11px;color:var(--suave);margin-bottom:18px;margin-top:4px}
+
+  /* ── KPI Cards ── */
+  .kpi-row{display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap}
+  .kpi-card{flex:1;min-width:120px;background:var(--card);border:1px solid var(--borda);border-radius:8px;padding:14px 16px;box-shadow:0 1px 4px rgba(0,0,0,.05)}
+  .kpi-card.destaque{border-left:3px solid var(--azul)}
+  .kpi-card.risco{border-left:3px solid var(--vermelho)}
+  .kpi-card.bloqueado{border-left:3px solid var(--vermelho);background:#fff5f5}
+  .kpi-lbl{font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:.7px;color:var(--suave);margin-bottom:5px}
+  .kpi-val{font-size:18px;font-weight:700;color:var(--cinza-dark);line-height:1.1}
+  .kpi-sub{font-size:10px;color:var(--suave);margin-top:3px}
+  .kpi-red{color:var(--vermelho)}
+
+  /* ── Seções de risco ── */
+  .section{margin-bottom:28px}
+  .section-hd{display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:6px;margin-bottom:8px}
+  .section-hd.alto{background:#fff0f0;border-left:4px solid var(--vermelho)}
+  .section-hd.medio{background:#fff8ee;border-left:4px solid var(--laranja)}
+  .section-hd.atenc{background:#f0fff4;border-left:4px solid var(--verde)}
+  .section-ttl{font-size:13px;font-weight:700}
+  .section-cnt{font-size:11px;color:var(--suave);margin-left:auto}
+
+  /* ── Tabela ── */
+  .tbl-wrap{overflow-x:auto;border:1px solid var(--borda);border-radius:6px}
+  table{border-collapse:collapse;width:100%;font-size:12px}
+  thead{position:sticky;top:0;z-index:5}
+  thead tr:first-child th{background:var(--azul);color:#fff;padding:8px 10px;text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap}
+  thead tr:last-child th{background:#e0f6fb;color:var(--azul);font-size:10px;font-weight:600;padding:5px 10px;text-transform:uppercase;letter-spacing:.4px}
+  tbody tr:hover td{background:#f0fbff}
+  tbody tr td{padding:9px 10px;border-bottom:1px solid #f0f3f6;vertical-align:middle}
+  .op-row td{background:#f8fbfe;padding:4px 10px 7px;border-bottom:2px solid #e4edf3;font-size:11px;color:var(--suave)}
+  .op-row:hover td{background:#f0f6fb}
+
+  /* ── Badges ── */
+  .bdg{display:inline-block;padding:2px 7px;border-radius:10px;font-size:10px;font-weight:700;margin-right:3px}
+  .bdg-alto{background:#fde8e8;color:var(--vermelho)}
+  .bdg-medio{background:#fff3e0;color:var(--laranja)}
+  .bdg-atenc{background:#e8f5e9;color:var(--verde)}
+  .neg{color:var(--vermelho);font-weight:700}
+  .pos{color:var(--verde);font-weight:700}
+
+  /* ── Status ── */
+  .st-bloq{background:var(--vermelho);color:#fff;font-size:9px;padding:1px 5px;border-radius:3px;font-weight:700;vertical-align:middle}
+  .st-inat{background:#bdc3c7;color:#fff;font-size:9px;padding:1px 5px;border-radius:3px}
+
+  /* ── Legenda ── */
+  .legenda{margin-top:24px;padding-top:14px;border-top:1px solid var(--borda);font-size:10px;color:#aaa;line-height:1.9}
+  .legenda strong{color:#bbb}
+
+  /* ── Rodapé ── */
+  .rpt-footer{background:var(--cinza-dark);padding:14px 28px;display:flex;align-items:center;justify-content:space-between;margin-top:0}
+  .rpt-footer p{font-size:11px;color:#8D8E8F;line-height:1.8}
+  .rpt-footer strong{color:var(--azul-vivo)}
+
+  /* ── Botão imprimir ── */
+  .btn-print{position:fixed;bottom:20px;right:20px;background:var(--azul);color:#fff;border:none;padding:10px 18px;border-radius:20px;font-size:12px;font-weight:600;cursor:pointer;box-shadow:0 3px 10px rgba(0,177,210,.35);z-index:99}
+  .btn-print:hover{background:#009ab8}
+
+  /* ── Banner teste ── */
+  .banner{background:var(--azul);color:#fff;padding:8px 28px;font-size:11px;font-weight:600}
+
+  @media print{
+    .btn-print,.banner{display:none}
+    .container{box-shadow:none}
+    thead{position:relative}
+    .rpt-body{padding:12px}
+    body{background:#fff}
+  }
+  @media(max-width:700px){
+    .kpi-row{gap:6px}
+    .kpi-card{min-width:calc(50% - 6px)}
+    .rpt-header{flex-direction:column;gap:8px}
+  }
 </style>
 """
 
+# ── Kion logo arc ─────────────────────────────────────────────────────────────
+KION_ARC = (
+    "<!--[if !mso]><!-->"
+    '<svg viewBox="0 0 110 100" width="36" height="32" '
+    'style="vertical-align:middle;display:inline-block">'
+    "<defs><linearGradient id=\"kg\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"0%\">"
+    '<stop offset="0%" stop-color="#00F5FF"/>'
+    '<stop offset="100%" stop-color="#FAEB1E"/>'
+    "</linearGradient></defs>"
+    '<path d="M 12 92 A 46 46 0 1 1 98 92" stroke="url(#kg)" '
+    'stroke-width="10" fill="none" stroke-linecap="round"/>'
+    "</svg>"
+    "<!--<![endif]-->"
+)
+
+# ── CSS ────────────────────────────────────────────────────────────────────────
+CSS = """
+<style>
+  body{{margin:0;padding:0;background:#f0f2f5;
+        font-family:Arial,Helvetica,sans-serif;font-size:13px;color:#282828}}
+  .wrapper{{max-width:860px;margin:0 auto;background:#fff;border-radius:0 0 8px 8px}}
+  .body-wrap{{padding:20px 24px}}
+  h2{{color:#282828;font-size:15px;font-weight:700;margin:0 0 2px;
+      padding-bottom:8px;border-bottom:2px solid #00B1D2}}
+  .subtitle{{color:#9AA0A6;font-size:11px;margin:0 0 14px}}
+  .section-title{{color:#00B1D2;font-size:12px;font-weight:700;
+                  margin:22px 0 6px;text-transform:uppercase;letter-spacing:.6px}}
+  /* ── Tabela de clientes ── */
+  .body-wrap table{{border-collapse:collapse;width:100%;margin:0 0 6px;font-size:12px}}
+  .body-wrap th{{background:#00B1D2;color:#fff;padding:7px 10px;text-align:left;
+                 font-size:10px;text-transform:uppercase;letter-spacing:.5px;font-weight:600}}
+  .body-wrap td{{padding:8px 10px;border-bottom:1px solid #edf0f3;vertical-align:middle}}
+  /* ── Badges ── */
+  .badge{{display:inline-block;padding:2px 8px;border-radius:10px;
+          font-size:11px;font-weight:700;margin-right:3px}}
+  .badge-alto{{background:#fde8e8;color:#c0392b}}
+  .badge-medio{{background:#fff8e1;color:#e67e22}}
+  .badge-atenc{{background:#e8f5e9;color:#27ae60}}
+  .neg{{color:#c0392b;font-weight:700}}
+  .pos{{color:#27ae60;font-weight:700}}
+  /* ── Resumo ── */
+  .kpi-label{{font-size:9px;color:#9AA0A6;text-transform:uppercase;
+              letter-spacing:.6px;margin-bottom:4px}}
+  .kpi-value{{font-size:17px;font-weight:700;color:#282828;line-height:1.1}}
+  .kpi-sub{{font-size:10px;color:#9AA0A6;margin-top:2px}}
+  /* ── Banner teste ── */
+  .banner{{background:#00B1D2;color:#fff;padding:8px 12px;font-weight:700;
+           border-radius:4px;margin-bottom:14px;font-size:11px}}
+  /* ── Sub-linha operacional ── */
+  .op-row td{{background:#f7f9fb;font-size:11px;color:#666;
+              padding:4px 10px 6px;border-bottom:2px solid #e4e9ef}}
+</style>
+"""
+
+
 def _header(tag_titulo):
     return (
-        f"<div class='kion-header'>"
-        f"<div style='display:flex;align-items:center'>{KION_ARC}"
-        f"<div><div class='kion-name'>KION</div>"
-        f"<div class='kion-sub'>DENTAL TECHNOLOGY</div></div></div>"
-        f"<div class='kion-tag'>Alerta Comercial<br><strong>{tag_titulo}</strong></div>"
-        f"</div><div class='kion-bar'></div>"
+        '<table width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#282828" '
+        'style="border-collapse:collapse;background:#282828">'
+        "<tr>"
+        '<td align="left" bgcolor="#282828" '
+        'style="padding:16px 24px;vertical-align:middle;background:#282828">'
+        '<table cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse"><tr>'
+        '<td style="vertical-align:middle;padding-right:10px;font-size:0;line-height:0">'
+        f"{KION_ARC}</td>"
+        '<td style="vertical-align:middle">'
+        '<p style="margin:0;padding:0;font-size:21px;font-weight:900;letter-spacing:3px;'
+        'color:#00F5FF;font-family:Arial,Helvetica,sans-serif;line-height:1.2">KION</p>'
+        '<p style="margin:0;padding:0;font-size:10px;color:#8D8E8F;letter-spacing:1px;'
+        'font-family:Arial,Helvetica,sans-serif">DENTAL TECHNOLOGY</p>'
+        "</td></tr></table></td>"
+        '<td align="right" bgcolor="#282828" '
+        'style="padding:16px 24px;vertical-align:middle;text-align:right;background:#282828">'
+        '<p style="margin:0;padding:0;font-size:11px;color:#8D8E8F;line-height:1.5;'
+        'font-family:Arial,Helvetica,sans-serif">'
+        f"Alerta Comercial<br><strong style=\"color:#00B1D2\">{tag_titulo}</strong>"
+        "</p></td></tr></table>"
+        '<table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse">'
+        '<tr><td height="4" bgcolor="#00B1D2" style="height:4px;font-size:0;line-height:0;'
+        "background:#00B1D2;background:linear-gradient(90deg,#00F5FF 0%,#00B1D2 50%,#FAEB1E 100%)\">"
+        "&nbsp;</td></tr></table>"
     )
+
+
+def _legenda() -> str:
+    """Bloco de legenda sutil antes do rodapé."""
+    return (
+        '<table width="100%" cellpadding="0" cellspacing="0" '
+        'style="border-collapse:collapse;margin-top:24px">'
+        '<tr><td style="border-top:1px solid #edf0f3;padding:12px 0 4px">'
+        '<p style="margin:0 0 6px;font-size:9px;color:#bdc3c7;'
+        'text-transform:uppercase;letter-spacing:.8px;font-family:Arial,sans-serif">'
+        'Legenda</p>'
+        '<p style="margin:0;font-size:10px;color:#bdc3c7;line-height:1.8;'
+        'font-family:Arial,sans-serif">'
+        '<strong style="color:#9AA0A6">MRR Atual</strong> Faturamento real do m&ecirc;s (ERP) &nbsp;&bull;&nbsp; '
+        '<strong style="color:#9AA0A6">Proj. M&ecirc;s</strong> Estimativa de fechamento = acumulado &divide; dias &uacute;teis decorridos &times; dias &uacute;teis totais &nbsp;&bull;&nbsp; '
+        '<strong style="color:#9AA0A6">Mediana 12M</strong> Baseline hist&oacute;rico (mediana dos &uacute;ltimos 12 meses com faturamento &gt; 0) &nbsp;&bull;&nbsp; '
+        '<strong style="color:#9AA0A6">Varia&ccedil;&atilde;o</strong> (MRR Atual &minus; Mediana) &divide; Mediana &nbsp;&bull;&nbsp; '
+        '<strong style="color:#9AA0A6">Meses&nbsp;&#8595;</strong> Meses consecutivos de queda &nbsp;&bull;&nbsp; '
+        '<strong style="color:#9AA0A6">Impacto</strong> Mediana &minus; MRR Atual'
+        '</p>'
+        '<p style="margin:6px 0 0;font-size:10px;color:#bdc3c7;line-height:1.8;'
+        'font-family:Arial,sans-serif">'
+        '<strong style="color:#9AA0A6">Casos Novos</strong> Pedidos &uacute;nicos sem Repeti&ccedil;&atilde;o ou Ajuste no m&ecirc;s &nbsp;&bull;&nbsp; '
+        '<strong style="color:#9AA0A6">Proj. Casos</strong> Mesma f&oacute;rmula de proje&ccedil;&atilde;o aplicada a casos &nbsp;&bull;&nbsp; '
+        '<strong style="color:#9AA0A6">Med. Casos 12M</strong> Mediana hist&oacute;rica de casos novos &nbsp;&bull;&nbsp; '
+        '<strong style="color:#9AA0A6">Adj %</strong> Pedidos de ajuste &divide; total &nbsp;&bull;&nbsp; '
+        '<strong style="color:#9AA0A6">Rep %</strong> Pedidos de repeti&ccedil;&atilde;o &divide; total &nbsp;&bull;&nbsp; '
+        '<span style="color:#c0392b">Vermelho</span> quando Adj ou Rep &gt; 20%'
+        '</p>'
+        '</td></tr></table>'
+    )
+
 
 def _footer(mes_ref):
     return (
-        f"<div class='kion-footer'><div class='kion-footer-inner'>"
-        f"<div class='footer-left'>"
-        f"<strong>Analytics Kion Dental</strong><br>"
-        f"analytics@kiondental.tech<br>"
-        f"An&aacute;lise desenvolvida pelo "
-        f"<strong>Time de Tecnologia e Inova&ccedil;&atilde;o da Kion</strong>"
-        f"</div>"
-        f"<div class='footer-right'>{KION_ARC}<br>"
-        f"Gerado automaticamente &bull; {mes_ref.upper()}</div>"
-        f"</div></div>"
+        '<table width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#282828" '
+        'style="border-collapse:collapse;background:#282828">'
+        "<tr>"
+        '<td colspan="2" bgcolor="#282828" style="padding:0 24px;background:#282828;font-size:0;line-height:0">'
+        '<table width="100%" cellpadding="0" cellspacing="0" border="0" '
+        'style="border-collapse:collapse;border-top:1px solid #3a3a3a">'
+        '<tr><td style="height:1px;font-size:0;line-height:0">&nbsp;</td></tr>'
+        "</table></td></tr><tr>"
+        '<td bgcolor="#282828" style="padding:12px 24px 14px;vertical-align:middle;background:#282828">'
+        '<p style="margin:0;padding:0;font-size:11px;color:#8D8E8F;line-height:1.9;'
+        'font-family:Arial,Helvetica,sans-serif">'
+        '<strong style="color:#00F5FF">Analytics Kion Dental</strong><br>'
+        "analytics@kiondental.tech<br>"
+        "An&aacute;lise desenvolvida pelo "
+        '<strong style="color:#00F5FF">Time de Tecnologia e Inova&ccedil;&atilde;o da Kion</strong>'
+        "</p></td>"
+        '<td align="right" bgcolor="#282828" '
+        'style="padding:12px 24px 14px;text-align:right;vertical-align:middle;background:#282828">'
+        f"{KION_ARC}"
+        f'<p style="margin:4px 0 0;padding:0;font-size:10px;color:#5A5A5A;line-height:1.8;'
+        f'font-family:Arial,Helvetica,sans-serif">'
+        f"Gerado automaticamente &bull; {mes_ref.upper()}"
+        f"</p></td></tr></table>"
     )
 
 
-def gerar_email_territorio(nome_resp, codigo, df_terr, mes_ref, cfg, modo_teste):
+def _kpi_row_relatorio(fat_total, fat_proj, total_ativos, n_alto, n_medio,
+                       n_atenc, fat_risco, impacto_total, total_casos, casos_proj, n_bloqueados, mes_ref):
+    """KPI cards para o relatório HTML standalone (CSS moderno)."""
+    return f"""
+    <div class="kpi-row">
+      <div class="kpi-card destaque">
+        <div class="kpi-lbl">Faturamento {mes_ref}</div>
+        <div class="kpi-val">R$&nbsp;{fat_total:,.0f}</div>
+        <div class="kpi-sub">Proj:&nbsp;R$&nbsp;{fat_proj:,.0f}</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-lbl">Clientes Ativos</div>
+        <div class="kpi-val">{total_ativos}</div>
+      </div>
+      <div class="kpi-card risco">
+        <div class="kpi-lbl">Em Risco</div>
+        <div class="kpi-val kpi-red">{n_alto + n_medio}</div>
+        <div class="kpi-sub">
+          <span class="bdg bdg-alto">&#128308;&nbsp;{n_alto}</span>
+          <span class="bdg bdg-medio">&#129473;&nbsp;{n_medio}</span>
+          {f'<span class="bdg bdg-atenc">&#128994;&nbsp;{n_atenc}</span>' if n_atenc > 0 else ''}
+        </div>
+      </div>
+      <div class="kpi-card risco">
+        <div class="kpi-lbl">Fat. em Risco</div>
+        <div class="kpi-val kpi-red">R$&nbsp;{fat_risco:,.0f}</div>
+        <div class="kpi-sub">{fat_risco/fat_total*100:.1f}%&nbsp;da&nbsp;carteira</div>
+      </div>
+      <div class="kpi-card risco">
+        <div class="kpi-lbl">Impacto vs. Mediana</div>
+        <div class="kpi-val kpi-red">-R$&nbsp;{impacto_total:,.0f}</div>
+        <div class="kpi-sub">por&nbsp;m&ecirc;s</div>
+      </div>
+      {f'''<div class="kpi-card destaque">
+        <div class="kpi-lbl">Casos Novos</div>
+        <div class="kpi-val">{total_casos}</div>
+        <div class="kpi-sub">Proj:&nbsp;{casos_proj}</div>
+      </div>''' if total_casos > 0 else ''}
+      {f'''<div class="kpi-card bloqueado">
+        <div class="kpi-lbl" style="color:var(--vermelho)">Bloqueados</div>
+        <div class="kpi-val kpi-red">&#128683;&nbsp;{n_bloqueados}</div>
+      </div>''' if n_bloqueados > 0 else ''}
+    </div>"""
+
+
+def _bloco_risco_relatorio(df_terr, nivel, label_acao, show_vendas=False, cfg=None):
+    """Versão do bloco de risco para o relatório HTML standalone (CSS moderno)."""
+    grupo = df_terr[df_terr["risco"] == nivel].sort_values("impacto_rs", ascending=False)
+    if grupo.empty:
+        return ""
+
+    n           = len(grupo)
+    tem_pedidos = "casos_novos_atual" in df_terr.columns
+    COR_HD      = {"ALTO": "alto", "MÉDIO": "medio", "ATENÇÃO": "atenc"}
+    cls_hd      = COR_HD.get(nivel, "atenc")
+    EMOJI_MAP   = {"ALTO": "🔴", "MÉDIO": "🟡", "ATENÇÃO": "🟢"}
+    emoji       = EMOJI_MAP.get(nivel, "")
+    rows        = ""
+
+    for _, r in grupo.iterrows():
+        tabela    = str(r.get("tabela") or ""); tabela = "" if pd.isna(r.get("tabela")) else tabela
+        fat_proj  = float(r.get("fat_projetado") or r["mes_atual"])
+        casos     = int(r.get("casos_novos_atual") or 0)
+        casos_prj = int(r.get("casos_projetados") or casos)
+        casos_med = float(r.get("casos_mediana_12m") or 0)
+        casos_var = r.get("casos_var_pct")
+        casos_mq  = int(r.get("casos_meses_queda") or 0)
+        adj_pct   = float(r.get("adj_pct_atual") or 0)
+        rep_pct   = float(r.get("rep_pct_atual") or 0)
+        vf        = r["variacao_pct"]
+        cor_vf    = "neg" if vf < 0 else "pos"
+
+        status = str(r.get("status_financeiro") or "Ativo")
+        st_badge = ""
+        if status == "Bloqueado":
+            mot = str(r.get("motivo_bloqueio") or "")
+            mot_txt = f" · {mot}" if mot and mot != "nan" else ""
+            st_badge = f' <span class="st-bloq">&#128683; BLOQUEADO{mot_txt}</span>'
+        elif status == "Inativo":
+            st_badge = ' <span class="st-inat">INATIVO</span>'
+
+        resp_cell = ""
+        if show_vendas and cfg:
+            terr = str(r.get("vendas") or "—")
+            nome_r = cfg.get("territorios", {}).get(terr, {}).get("nome", terr) if terr != "—" else "—"
+            resp_cell = f"<td><strong style='color:var(--azul)'>{terr}</strong><br><span style='color:var(--suave);font-size:11px'>{nome_r}</span></td>"
+
+        if tem_pedidos:
+            vc_str = "—"
+            if casos_var is not None and not pd.isna(casos_var):
+                cl = "neg" if casos_var < -10 else "pos" if casos_var > 5 else ""
+                vc_str = f"<span class='{cl}'>{casos_var:+.0f}%</span>"
+            adj_cl = "neg" if adj_pct > 20 else ""
+            rep_cl = "neg" if rep_pct > 20 else ""
+            sub_row = f"""<tr class="op-row">
+              <td style="font-style:italic;color:var(--suave)">{tabela}</td>
+              {f"<td></td>" if show_vendas else ""}
+              <td><strong style="color:var(--azul)">{casos}</strong>&nbsp;<span style="color:#ccc">|</span>&nbsp;<span style="color:var(--suave)">proj {casos_prj}</span></td>
+              <td style="color:var(--suave)">{casos_prj}</td>
+              <td style="color:var(--suave)">{casos_med:.0f}</td>
+              <td>{vc_str}</td>
+              <td style="color:var(--suave)">{casos_mq}m&nbsp;&#8595;</td>
+              <td><span class="{adj_cl}">Adj&nbsp;{adj_pct:.0f}%</span>&nbsp;<span class="{rep_cl}">Rep&nbsp;{rep_pct:.0f}%</span></td>
+            </tr>"""
+        else:
+            sub_row = ""
+
+        rows += f"""<tr>
+          <td style="padding:9px 10px 5px">
+            <strong>{r['Cliente']}</strong>{st_badge}<br>
+            <span style="font-size:10px;color:var(--suave)">{abs(vf):.0f}% abaixo da mediana{f" · {int(r['meses_queda'])}m em queda" if r['meses_queda'] > 0 else ""}</span>
+          </td>
+          {resp_cell}
+          <td style="font-weight:700">R$&nbsp;{r['mes_atual']:,.0f}</td>
+          <td style="color:var(--suave)">R$&nbsp;{fat_proj:,.0f}</td>
+          <td style="color:var(--suave)">R$&nbsp;{r['media_12m']:,.0f}</td>
+          <td class="{cor_vf}" style="font-weight:700">{vf:+.0f}%</td>
+          <td style="color:var(--suave)">{int(r['meses_queda'])}m</td>
+          <td class="neg" style="font-weight:700">-R$&nbsp;{r['impacto_rs']:,.0f}</td>
+        </tr>{sub_row}"""
+
+    col_resp_th = "<th>Respons&aacute;vel</th>" if show_vendas else ""
+    col_resp_op = "<th></th>" if show_vendas else ""
+    cli_w = "26%" if show_vendas else "32%"
+
+    return f"""
+    <div class="section">
+      <div class="section-hd {cls_hd}">
+        <span style="font-size:16px">{emoji}</span>
+        <span class="section-ttl">{nivel} &mdash; {label_acao}</span>
+        <span class="section-cnt">{n}&nbsp;cliente(s)</span>
+      </div>
+      <div class="tbl-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:{cli_w}">Cliente</th>{col_resp_th}
+              <th>MRR Atual</th><th>Proj.&nbsp;M&ecirc;s</th>
+              <th>Mediana&nbsp;12M</th><th>Varia&ccedil;&atilde;o</th>
+              <th>Meses&nbsp;&#8595;</th><th>Impacto/m&ecirc;s</th>
+            </tr>
+            {f'''<tr>
+              <th>Tabela de Pre&ccedil;o</th>{col_resp_op}
+              <th>Casos Novos</th><th>Proj. Casos</th>
+              <th>Med. Casos 12M</th><th>Var. Casos</th>
+              <th>Meses &#8595;</th><th>Qualidade</th>
+            </tr>''' if tem_pedidos else ''}
+          </thead>
+          <tbody>{rows}</tbody>
+        </table>
+      </div>
+    </div>"""
+
+
+def _legenda_relatorio():
+    return """
+    <div class="legenda">
+      <strong>MRR Atual</strong> Faturamento real do mês (ERP) &nbsp;&bull;&nbsp;
+      <strong>Proj. Mês</strong> Acumulado ÷ dias úteis decorridos × dias úteis totais &nbsp;&bull;&nbsp;
+      <strong>Mediana 12M</strong> Mediana dos últimos 12 meses com faturamento &gt; 0 &nbsp;&bull;&nbsp;
+      <strong>Variação</strong> (MRR Atual − Mediana) ÷ Mediana &nbsp;&bull;&nbsp;
+      <strong>Meses ↓</strong> Meses consecutivos de queda &nbsp;&bull;&nbsp;
+      <strong>Impacto</strong> Mediana − MRR Atual<br>
+      <strong>Casos Novos</strong> Pedidos únicos sem R ou A &nbsp;&bull;&nbsp;
+      <strong>Adj %</strong> Ajustes ÷ total pedidos &nbsp;&bull;&nbsp;
+      <strong>Rep %</strong> Repetições ÷ total pedidos &nbsp;&bull;&nbsp;
+      <span style="color:var(--vermelho)">Vermelho</span> quando Adj ou Rep &gt; 20%
+    </div>"""
+
+
+def _header_relatorio(tag_titulo):
+    return f"""
+    <div class="rpt-header">
+      <div class="rpt-brand">
+        {KION_ARC}
+        <div>
+          <div class="rpt-nome">KION</div>
+          <div class="rpt-sub">DENTAL TECHNOLOGY</div>
+        </div>
+      </div>
+      <div class="rpt-tag">Alerta Comercial<br><strong>{tag_titulo}</strong></div>
+    </div>
+    <div class="rpt-bar"></div>"""
+
+
+def _footer_relatorio(mes_ref):
+    return f"""
+    <div class="rpt-footer">
+      <p>
+        <strong>Analytics Kion Dental</strong><br>
+        analytics@kiondental.tech<br>
+        Análise desenvolvida pelo <strong>Time de Tecnologia e Inovação da Kion</strong>
+      </p>
+      <p style="text-align:right">
+        {KION_ARC}<br>
+        Gerado automaticamente &bull; {mes_ref.upper()}
+      </p>
+    </div>"""
+
+
+def gerar_relatorio_territorio(nome_resp, codigo, df_terr, mes_ref, cfg, modo_teste):
+    """HTML completo e moderno para o arquivo ANEXO (abre no browser)."""
     total_ativos  = len(df_terr)
-    em_risco      = df_terr[df_terr["risco"].isin(["ALTO","MÉDIO"])]
+    em_risco      = df_terr[df_terr["risco"].isin(["ALTO", "MÉDIO"])]
     fat_risco     = em_risco["mes_atual"].sum()
     impacto_total = em_risco["impacto_rs"].sum()
     fat_total     = df_terr["mes_atual"].sum()
+    fat_proj      = float(df_terr.get("fat_projetado", df_terr["mes_atual"]).sum())
     n_alto        = (df_terr["risco"] == "ALTO").sum()
     n_medio       = (df_terr["risco"] == "MÉDIO").sum()
     n_atenc       = (df_terr["risco"] == "ATENÇÃO").sum()
+    n_bloqueados  = (df_terr.get("status_financeiro", pd.Series([])).astype(str) == "Bloqueado").sum()
+    total_casos   = int(df_terr.get("casos_novos_atual", pd.Series([0])).sum())
+    casos_proj    = int(df_terr.get("casos_projetados", pd.Series([0])).sum())
 
-    banner = (f"<div class='banner'>&#9888;&#65039; MODO TESTE &mdash; "
-              f"Em produ&ccedil;&atilde;o este e-mail vai para {nome_resp}</div>"
+    banner = (f'<div class="banner">&#9888; MODO TESTE — Em produção este relatório vai para {nome_resp}</div>'
               if modo_teste else "")
 
     blocos = (
-        _bloco_risco(df_terr, "ALTO",   "LIGAR HOJE") +
-        _bloco_risco(df_terr, "MÉDIO",  "CHECK-IN ESTA SEMANA") +
-        _bloco_risco(df_terr, "ATENÇÃO","MONITORAR")
-    )
-    if not blocos:
-        blocos = "<p style='color:#00B1D2'>&#9989; Nenhum cliente em risco no momento.</p>"
+        _bloco_risco_relatorio(df_terr, "ALTO",    "LIGAR HOJE") +
+        _bloco_risco_relatorio(df_terr, "MÉDIO",   "CHECK-IN ESTA SEMANA") +
+        _bloco_risco_relatorio(df_terr, "ATENÇÃO", "MONITORAR")
+    ) or "<p style='color:var(--verde);font-size:13px'>✅ Nenhum cliente em risco no momento.</p>"
 
+    kpis = _kpi_row_relatorio(fat_total, fat_proj, total_ativos, n_alto, n_medio,
+                               n_atenc, fat_risco, impacto_total, total_casos, casos_proj, n_bloqueados, mes_ref)
+
+    return f"""<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Alerta {mes_ref.upper()} — {nome_resp} ({codigo})</title>
+{CSS_RELATORIO}</head>
+<body>
+<button class="btn-print" onclick="window.print()">🖨 Imprimir</button>
+<div class="container">
+  {_header_relatorio('Monitoramento de Faturamento')}
+  <div class="rpt-body">
+    {banner}
+    <p class="rpt-title">Alerta de Faturamento — {nome_resp} ({codigo})</p>
+    <p class="rpt-subtitle">{mes_ref.upper()} &bull; Carteira do responsável &bull; Gerado em {datetime.now().strftime('%d/%m/%Y %H:%M')}</p>
+    {kpis}
+    {blocos}
+    {_legenda_relatorio()}
+  </div>
+  {_footer_relatorio(mes_ref)}
+</div>
+</body></html>"""
+
+
+def gerar_relatorio_gestor(df_ativos, mes_ref, cfg, modo_teste):
+    """HTML completo e moderno para o arquivo ANEXO do gestor."""
+    em_risco      = df_ativos[df_ativos["risco"].isin(["ALTO", "MÉDIO"])]
+    fat_total     = df_ativos["mes_atual"].sum()
+    fat_proj      = float(df_ativos.get("fat_projetado", df_ativos["mes_atual"]).sum())
+    fat_risco     = em_risco["mes_atual"].sum()
+    impacto_tot   = em_risco["impacto_rs"].sum()
+    n_bloqueados  = (df_ativos.get("status_financeiro", pd.Series([])).astype(str) == "Bloqueado").sum()
+    casos_total   = int(df_ativos.get("casos_novos_atual", pd.Series([0])).sum())
+    casos_proj_t  = int(df_ativos.get("casos_projetados", pd.Series([0])).sum())
+    n_alto        = (df_ativos["risco"] == "ALTO").sum()
+    n_medio       = (df_ativos["risco"] == "MÉDIO").sum()
+    n_atenc       = (df_ativos["risco"] == "ATENÇÃO").sum()
+
+    banner = ('<div class="banner">&#9888; MODO TESTE — Em produção este relatório vai para Bruno Garcia</div>'
+              if modo_teste else "")
+
+    # Tabela de resumo por território
+    linhas_terr = ""
+    for cod, info in cfg["territorios"].items():
+        t = df_ativos[df_ativos["vendas"] == cod]
+        t_risco = t[t["risco"].isin(["ALTO", "MÉDIO"])]
+        if t.empty: continue
+        t_fp   = float(t.get("fat_projetado", t["mes_atual"]).sum())
+        t_cas  = int(t.get("casos_novos_atual", pd.Series([0])).sum())
+        t_bloq = (t.get("status_financeiro", pd.Series([])).astype(str) == "Bloqueado").sum()
+        bloq_s = f' <span class="st-bloq" style="font-size:9px">&#128683;&nbsp;{t_bloq}</span>' if t_bloq > 0 else ""
+        linhas_terr += (
+            f"<tr><td><strong style='color:var(--azul)'>{cod}</strong>&nbsp;{info['nome']}</td>"
+            f"<td style='font-weight:600'>R$&nbsp;{t['mes_atual'].sum():,.0f}"
+            f"<br><span style='font-size:10px;color:var(--suave)'>Proj:&nbsp;R$&nbsp;{t_fp:,.0f}</span></td>"
+            f"<td>{len(t)}{bloq_s}</td>"
+            f"<td><span class='bdg bdg-alto'>{(t['risco']=='ALTO').sum()}</span>&nbsp;"
+            f"<span class='bdg bdg-medio'>{(t['risco']=='MÉDIO').sum()}</span></td>"
+            f"<td class='neg' style='font-weight:700'>-R$&nbsp;{t_risco['impacto_rs'].sum():,.0f}</td>"
+            f"<td style='color:var(--suave)'>{t_cas if t_cas > 0 else '—'}</td></tr>"
+        )
+
+    kpis = _kpi_row_relatorio(fat_total, fat_proj, len(df_ativos), n_alto, n_medio,
+                               n_atenc, fat_risco, impacto_tot, casos_total, casos_proj_t, n_bloqueados, mes_ref)
+
+    blocos = (
+        _bloco_risco_relatorio(df_ativos, "ALTO",    "LIGAR HOJE",           show_vendas=True, cfg=cfg) +
+        _bloco_risco_relatorio(df_ativos, "MÉDIO",   "CHECK-IN ESTA SEMANA", show_vendas=True, cfg=cfg) +
+        _bloco_risco_relatorio(df_ativos, "ATENÇÃO", "MONITORAR",            show_vendas=True, cfg=cfg)
+    )
+
+    return f"""<!DOCTYPE html>
+<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Alerta Consolidado {mes_ref.upper()}</title>
+{CSS_RELATORIO}</head>
+<body>
+<button class="btn-print" onclick="window.print()">🖨 Imprimir</button>
+<div class="container">
+  {_header_relatorio('Visão Consolidada')}
+  <div class="rpt-body">
+    {banner}
+    <p class="rpt-title">Alerta de Faturamento — Visão Consolidada</p>
+    <p class="rpt-subtitle">{mes_ref.upper()} &bull; Todos os territórios &bull; Gerado em {datetime.now().strftime('%d/%m/%Y %H:%M')}</p>
+    {kpis}
+    <div class="section">
+      <div class="section-hd atenc"><span style="font-size:16px">📊</span>
+        <span class="section-ttl">Resumo por Território</span>
+      </div>
+      <div class="tbl-wrap"><table>
+        <thead><tr>
+          <th>Território</th><th>Faturamento / Proj.</th><th>Ativos</th>
+          <th>Em Risco</th><th>Impacto</th><th>Casos Novos</th>
+        </tr></thead>
+        <tbody>{linhas_terr}</tbody>
+      </table></div>
+    </div>
+    {blocos}
+    {_legenda_relatorio()}
+  </div>
+  {_footer_relatorio(mes_ref)}
+</div>
+</body></html>"""
+
+
+def _corpo_simples(titulo, subtitulo, mes_ref, fat_total, fat_proj,
+                   n_alto, n_medio, fat_risco, impacto, top5_linhas,
+                   modo_teste, banner_txt, n_bloqueados=0, nome_arquivo=""):
+    """E-mail de notificação simples — corpo enxuto, detalhes no anexo."""
+    bloq = (f"<tr><td colspan='3' style='padding:6px 0;color:#c0392b;font-size:11px'>"
+            f"&#128683; {n_bloqueados} cliente(s) bloqueado(s)</td></tr>"
+            if n_bloqueados > 0 else "")
+    anexo_msg = (
+        f"<p style='font-size:12px;color:#555;background:#f0fbff;"
+        f"border-left:3px solid #00B1D2;padding:10px 14px;margin:0 0 16px;border-radius:0 4px 4px 0'>"
+        f"&#128206; O relatório completo está no arquivo <strong>{nome_arquivo}</strong> anexado a este e-mail."
+        f"</p>"
+        if nome_arquivo else ""
+    )
+    banner = (f"<div class='banner'>&#9888; MODO TESTE &mdash; {banner_txt}</div>"
+              if modo_teste else "")
     return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8">{CSS}</head><body>
 <div class='wrapper'>
   {_header('Monitoramento de Faturamento')}
   <div class='body-wrap'>
     {banner}
-    <h2>Alerta de Faturamento &mdash; {nome_resp} ({codigo})</h2>
-    <p class='subtitle'>{mes_ref.upper()} &bull; Carteira do respons&aacute;vel
-       &bull; Gerado em {datetime.now().strftime('%d/%m/%Y %H:%M')}</p>
-    <div class='resumo'>
-      <strong>Resumo da carteira</strong><br>
-      Faturamento {mes_ref}: <strong>R$ {fat_total:,.0f}</strong>
-      &nbsp;|&nbsp; Clientes ativos: <strong>{total_ativos}</strong><br>
-      Em risco:
-        <span class='badge alto'>&#128308; ALTO: {n_alto}</span>
-        <span class='badge medio'>&#129473; M&Eacute;DIO: {n_medio}</span>
-        &nbsp;Aten&ccedil;&atilde;o: {n_atenc}<br>
-      Faturamento em risco:
-        <strong class='neg'>R$ {fat_risco:,.0f}</strong>
-        ({fat_risco/fat_total*100:.1f}% da carteira)<br>
-      Impacto vs. m&eacute;dia 12M:
-        <strong class='neg'>-R$ {impacto_total:,.0f}/m&ecirc;s</strong>
-    </div>
-    {blocos}
+    <h2>{titulo}</h2>
+    <p class='subtitle'>{subtitulo}</p>
+    {anexo_msg}
+    <table width="100%" cellpadding="0" cellspacing="0"
+           style="border-collapse:collapse;background:#f8fbff;border:1px solid #d6eaf8;
+                  border-radius:6px;margin-bottom:18px">
+      <tr>
+        <td style="padding:12px 14px;border-right:1px solid #d6eaf8;vertical-align:top">
+          <div class="kpi-label">Faturamento {mes_ref}</div>
+          <div class="kpi-value">R$&nbsp;{fat_total:,.0f}</div>
+          <div class="kpi-sub">Proj:&nbsp;R$&nbsp;{fat_proj:,.0f}</div>
+        </td>
+        <td style="padding:12px 14px;border-right:1px solid #d6eaf8;vertical-align:top">
+          <div class="kpi-label">Em Risco</div>
+          <div class="kpi-value" style="color:#c0392b">{n_alto + n_medio}</div>
+          <div class="kpi-sub">
+            <span class="badge badge-alto">&#128308;&nbsp;{n_alto}</span>&nbsp;
+            <span class="badge badge-medio">&#129473;&nbsp;{n_medio}</span>
+          </div>
+        </td>
+        <td style="padding:12px 14px;border-right:1px solid #d6eaf8;vertical-align:top">
+          <div class="kpi-label">Fat. em Risco</div>
+          <div class="kpi-value" style="color:#c0392b">R$&nbsp;{fat_risco:,.0f}</div>
+          <div class="kpi-sub">{fat_risco/fat_total*100:.1f}%&nbsp;da&nbsp;carteira</div>
+        </td>
+        <td style="padding:12px 14px;vertical-align:top">
+          <div class="kpi-label">Impacto vs.&nbsp;Mediana</div>
+          <div class="kpi-value" style="color:#c0392b">-R$&nbsp;{impacto:,.0f}</div>
+          <div class="kpi-sub">por&nbsp;m&ecirc;s</div>
+        </td>
+      </tr>
+    </table>
+    <p class="section-title" style="border-left:3px solid #c0392b;padding-left:8px">
+      &#128308; Top clientes ALTO risco
+    </p>
+    <table>
+      <thead><tr>
+        <th>Cliente</th><th>MRR Atual</th><th>Impacto/m&ecirc;s</th>
+      </tr></thead>
+      <tbody>{bloq}{top5_linhas}</tbody>
+    </table>
   </div>
   {_footer(mes_ref)}
 </div>
 </body></html>"""
 
 
-def gerar_email_gestor(df_ativos, mes_ref, cfg, modo_teste):
-    em_risco    = df_ativos[df_ativos["risco"].isin(["ALTO","MÉDIO"])]
-    fat_total   = df_ativos["mes_atual"].sum()
-    fat_risco   = em_risco["mes_atual"].sum()
-    impacto_tot = em_risco["impacto_rs"].sum()
+def gerar_email_territorio(nome_resp, codigo, df_terr, mes_ref, cfg, modo_teste,
+                            nome_arquivo=""):
+    """Corpo simples do e-mail — detalhes completos no anexo HTML."""
+    total_ativos  = len(df_terr)
+    em_risco      = df_terr[df_terr["risco"].isin(["ALTO", "MÉDIO"])]
+    fat_risco     = em_risco["mes_atual"].sum()
+    impacto_total = em_risco["impacto_rs"].sum()
+    fat_total     = df_terr["mes_atual"].sum()
+    fat_proj      = float(df_terr.get("fat_projetado", df_terr["mes_atual"]).sum())
+    n_alto        = (df_terr["risco"] == "ALTO").sum()
+    n_medio       = (df_terr["risco"] == "MÉDIO").sum()
+    n_atenc       = (df_terr["risco"] == "ATENÇÃO").sum()
 
-    banner = ("<div class='banner'>&#9888;&#65039; MODO TESTE &mdash; "
-              "Em produ&ccedil;&atilde;o este e-mail vai para Bruno Garcia</div>"
-              if modo_teste else "")
+    n_bloqueados = (df_terr.get("status_financeiro", pd.Series([])).astype(str) == "Bloqueado").sum()
 
-    top = em_risco.sort_values("impacto_rs", ascending=False).head(15)
-    linhas_top = ""
-    for _, r in top.iterrows():
-        terr  = r["vendas"] if pd.notna(r["vendas"]) else "—"
-        resp  = cfg["territorios"].get(terr, {}).get("nome", terr)
-        emoji = EMOJI.get(r["risco"], "")
-        tab   = r["tabela"] if pd.notna(r["tabela"]) else ""
-        linhas_top += (
-            f"<tr><td>{emoji} <strong>{r['risco']}</strong></td>"
-            f"<td><strong>{r['Cliente']}</strong><br>"
-            f"<small style='color:#8D8E8F'>{tab}</small></td>"
-            f"<td>{terr} {resp}</td>"
-            f"<td>R$ {r['mes_atual']:,.0f}</td>"
-            f"<td class='neg'>{r['variacao_pct']:+.0f}%</td>"
-            f"<td>{int(r['meses_queda'])}m</td>"
-            f"<td class='neg'><strong>-R$ {r['impacto_rs']:,.0f}</strong></td></tr>"
+    # Top 5 ALTO por impacto
+    top5 = df_terr[df_terr["risco"] == "ALTO"].sort_values("impacto_rs", ascending=False).head(5)
+    top5_linhas = ""
+    for _, r in top5.iterrows():
+        st = _status_badge(r)
+        top5_linhas += (
+            f"<tr><td><strong>{r['Cliente']}</strong>{st}</td>"
+            f"<td>R$&nbsp;{r['mes_atual']:,.0f}</td>"
+            f"<td style='color:#c0392b;font-weight:700'>-R$&nbsp;{r['impacto_rs']:,.0f}</td></tr>"
         )
 
+    return _corpo_simples(
+        titulo=f"Alerta de Faturamento &mdash; {nome_resp} ({codigo})",
+        subtitulo=f"{mes_ref.upper()} &bull; {total_ativos} clientes ativos &bull; Gerado em {datetime.now().strftime('%d/%m/%Y %H:%M')}",
+        mes_ref=mes_ref, fat_total=fat_total, fat_proj=fat_proj,
+        n_alto=n_alto, n_medio=n_medio, fat_risco=fat_risco,
+        impacto=impacto_total, top5_linhas=top5_linhas,
+        modo_teste=modo_teste,
+        banner_txt=f"Em produ&ccedil;&atilde;o este e-mail vai para {nome_resp}",
+        n_bloqueados=n_bloqueados, nome_arquivo=nome_arquivo,
+    )
+
+
+def gerar_email_gestor(df_ativos, mes_ref, cfg, modo_teste, nome_arquivo=""):
+    """Corpo simples do e-mail consolidado — detalhes no anexo HTML."""
+    em_risco      = df_ativos[df_ativos["risco"].isin(["ALTO", "MÉDIO"])]
+    fat_total     = df_ativos["mes_atual"].sum()
+    fat_proj_tot  = float(df_ativos.get("fat_projetado", df_ativos["mes_atual"]).sum())
+    fat_risco     = em_risco["mes_atual"].sum()
+    impacto_tot   = em_risco["impacto_rs"].sum()
+    n_bloqueados  = (df_ativos.get("status_financeiro", pd.Series([])).astype(str) == "Bloqueado").sum()
+    n_alto_total  = (df_ativos["risco"] == "ALTO").sum()
+    n_medio_total = (df_ativos["risco"] == "MÉDIO").sum()
+
+    # Top 5 ALTO por impacto (todos os territórios)
+    top5 = df_ativos[df_ativos["risco"] == "ALTO"].sort_values("impacto_rs", ascending=False).head(5)
+    top5_linhas = ""
+    for _, r in top5.iterrows():
+        terr = str(r.get("vendas") or "—")
+        nome_r = cfg.get("territorios", {}).get(terr, {}).get("nome", terr)
+        st = _status_badge(r)
+        top5_linhas += (
+            f"<tr><td><strong>{r['Cliente']}</strong>{st}"
+            f"<br><small style='color:#9AA0A6'>{terr}&nbsp;{nome_r}</small></td>"
+            f"<td>R$&nbsp;{r['mes_atual']:,.0f}</td>"
+            f"<td style='color:#c0392b;font-weight:700'>-R$&nbsp;{r['impacto_rs']:,.0f}</td></tr>"
+        )
+
+    # Resumo de territórios como linhas extras
     linhas_terr = ""
     for cod, info in cfg["territorios"].items():
         t       = df_ativos[df_ativos["vendas"] == cod]
-        t_risco = t[t["risco"].isin(["ALTO","MÉDIO"])]
+        t_risco = t[t["risco"].isin(["ALTO", "MÉDIO"])]
         if t.empty:
             continue
+        t_fat_proj = float(t.get("fat_projetado", t["mes_atual"]).sum())
+        t_bloq     = (t.get("status_financeiro", pd.Series([])).astype(str) == "Bloqueado").sum()
+        bloq_txt   = f"&nbsp;<span style='color:#c0392b;font-size:10px'>&#128683;&nbsp;{t_bloq}</span>" if t_bloq > 0 else ""
         linhas_terr += (
             f"<tr>"
-            f"<td><strong style='color:#00B1D2'>{cod}</strong> {info['nome']}</td>"
-            f"<td>{len(t)}</td>"
-            f"<td><span class='badge alto'>{(t['risco']=='ALTO').sum()}</span>"
-            f"<span class='badge medio'>{(t['risco']=='MÉDIO').sum()}</span></td>"
-            f"<td class='neg'><strong>R$ {t_risco['impacto_rs'].sum():,.0f}</strong></td>"
+            f"<td><strong style='color:#00B1D2'>{cod}</strong>&nbsp;{info['nome']}</td>"
+            f"<td style='font-weight:700'>R$&nbsp;{t['mes_atual'].sum():,.0f}"
+            f"<br><small style='color:#9AA0A6'>Proj:&nbsp;R$&nbsp;{t_fat_proj:,.0f}</small></td>"
+            f"<td>{len(t)}{bloq_txt}</td>"
+            f"<td><span class='badge badge-alto'>{(t['risco']=='ALTO').sum()}</span>"
+            f"&nbsp;<span class='badge badge-medio'>{(t['risco']=='MÉDIO').sum()}</span></td>"
+            f"<td style='font-weight:700;color:#c0392b'>-R$&nbsp;{t_risco['impacto_rs'].sum():,.0f}</td>"
             f"</tr>"
         )
 
-    return f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8">{CSS}</head><body>
-<div class='wrapper'>
-  {_header('Vis&atilde;o Consolidada')}
-  <div class='body-wrap'>
-    {banner}
-    <h2>Alerta de Faturamento &mdash; Vis&atilde;o Consolidada</h2>
-    <p class='subtitle'>{mes_ref.upper()} &bull; Resumo executivo de todos os territ&oacute;rios
-       &bull; Gerado em {datetime.now().strftime('%d/%m/%Y %H:%M')}</p>
-    <div class='resumo'>
-      <strong>Vis&atilde;o Executiva</strong><br>
-      Faturamento total {mes_ref}: <strong>R$ {fat_total:,.0f}</strong>
-      &nbsp;|&nbsp; Clientes ativos: <strong>{len(df_ativos):,}</strong><br>
-      Em risco:
-        <span class='badge alto'>&#128308; ALTO: {(df_ativos['risco']=='ALTO').sum()}</span>
-        <span class='badge medio'>&#129473; M&Eacute;DIO: {(df_ativos['risco']=='MÉDIO').sum()}</span><br>
-      Faturamento em risco:
-        <strong class='neg'>R$ {fat_risco:,.0f}</strong>
-        ({fat_risco/fat_total*100:.1f}% do total)<br>
-      Impacto potencial vs. m&eacute;dia 12M:
-        <strong class='neg'>-R$ {impacto_tot:,.0f}/m&ecirc;s</strong>
-    </div>
-    <h3>&#127942; Top 15 &mdash; Maior Impacto Financeiro</h3>
-    <table>
-      <thead><tr>
-        <th>Risco</th><th>Cliente</th><th>Respons&aacute;vel</th>
-        <th>MRR Atual</th><th>Varia&ccedil;&atilde;o</th>
-        <th>Meses</th><th>Impacto</th>
-      </tr></thead>
-      <tbody>{linhas_top}</tbody>
-    </table>
-    <h3>&#128202; Resumo por Territ&oacute;rio</h3>
-    <table>
-      <thead><tr>
-        <th>Territ&oacute;rio</th><th>Ativos</th>
-        <th>Em Risco</th><th>Impacto R$</th>
-      </tr></thead>
-      <tbody>{linhas_terr}</tbody>
-    </table>
-  </div>
-  {_footer(mes_ref)}
-</div>
-</body></html>"""
+    # Corpo simples: top 5 + resumo por território
+    full_top5 = top5_linhas + linhas_terr
+
+    return _corpo_simples(
+        titulo="Alerta de Faturamento &mdash; Vis&atilde;o Consolidada",
+        subtitulo=f"{mes_ref.upper()} &bull; Todos os territ&oacute;rios &bull; Gerado em {datetime.now().strftime('%d/%m/%Y %H:%M')}",
+        mes_ref=mes_ref, fat_total=fat_total, fat_proj=fat_proj_tot,
+        n_alto=n_alto_total, n_medio=n_medio_total, fat_risco=fat_risco,
+        impacto=impacto_tot, top5_linhas=full_top5,
+        modo_teste=modo_teste,
+        banner_txt="Em produ&ccedil;&atilde;o este e-mail vai para Bruno Garcia",
+        n_bloqueados=n_bloqueados, nome_arquivo=nome_arquivo,
+    )
 
 
 # ─────────────────────────────────────────────
-#  ENVIO DE E-MAIL
+#  ENVIO — Microsoft Graph API
 # ─────────────────────────────────────────────
 
-def enviar_email(assunto, html, destinatarios, cfg, dry_run=False):
+def _get_graph_token():
+    tenant_id     = os.environ.get("GRAPH_TENANT_ID", "")
+    client_id     = os.environ.get("GRAPH_CLIENT_ID", "")
+    client_secret = os.environ.get("GRAPH_CLIENT_SECRET", "")
+    if not all([tenant_id, client_id, client_secret]):
+        raise ValueError("GRAPH_TENANT_ID, GRAPH_CLIENT_ID, GRAPH_CLIENT_SECRET não configurados.")
+    resp = requests.post(
+        f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token",
+        data={"grant_type": "client_credentials", "client_id": client_id,
+              "client_secret": client_secret, "scope": "https://graph.microsoft.com/.default"},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return resp.json()["access_token"]
+
+
+def enviar_email(assunto, html, destinatarios, cfg, dry_run=False,
+                 nome_anexo=None, html_anexo=None):
+    """
+    Envia e-mail via Microsoft Graph API.
+    html       → corpo do e-mail (notificação simples)
+    html_anexo → conteúdo do arquivo anexo (relatório completo)
+    nome_anexo → nome do arquivo .html anexado
+    """
     if not isinstance(destinatarios, list):
         destinatarios = [destinatarios]
-
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = assunto
-    msg["From"]    = f"{cfg['remetente']['nome']} <{cfg['remetente']['email']}>"
-    msg["To"]      = ", ".join(destinatarios)
-    msg.attach(MIMEText(html, "html", "utf-8"))
-
     if dry_run:
         logging.info(f"  [DRY-RUN] {assunto} → {destinatarios}")
         return True
-
     try:
-        # Senha via env var (produção) ou config.yaml (local)
-        senha = os.environ.get("SMTP_SENHA") or cfg["smtp"]["senha"]
-        with smtplib.SMTP(cfg["smtp"]["servidor"], cfg["smtp"]["porta"]) as server:
-            server.ehlo()
-            server.starttls()
-            server.login(cfg["smtp"]["usuario"], senha)
-            server.sendmail(cfg["remetente"]["email"], destinatarios, msg.as_string())
+        token = _get_graph_token()
+        rem   = cfg["remetente"]
+
+        # Anexa o relatório completo (html_anexo), não o corpo simples
+        attachments = []
+        conteudo_anexo = html_anexo or html
+        if nome_anexo and cfg.get("envio", {}).get("anexar_html", False):
+            html_b64 = base64.b64encode(conteudo_anexo.encode("utf-8")).decode("utf-8")
+            attachments.append({
+                "@odata.type": "#microsoft.graph.fileAttachment",
+                "name": nome_anexo,
+                "contentType": "text/html",
+                "contentBytes": html_b64,
+            })
+
+        payload = {
+            "message": {
+                "subject": assunto,
+                "body": {"contentType": "HTML", "content": html},
+                "from": {"emailAddress": {"address": rem["email"], "name": rem["nome"]}},
+                "toRecipients": [{"emailAddress": {"address": d}} for d in destinatarios],
+                **({"attachments": attachments} if attachments else {}),
+            },
+            "saveToSentItems": "false",
+        }
+        resp = requests.post(
+            f"https://graph.microsoft.com/v1.0/users/{rem['email']}/sendMail",
+            json=payload,
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            timeout=30,
+        )
+        resp.raise_for_status()
         logging.info(f"  ✅ Enviado: {assunto} → {destinatarios}")
         return True
-    except Exception as e:
-        logging.error(f"  ❌ Falha ao enviar '{assunto}': {e}")
+    except Exception as exc:
+        logging.error(f"  ❌ Falha ao enviar '{assunto}': {exc}")
         return False
 
 
@@ -513,60 +1418,91 @@ def main():
     prefixo    = "[TESTE] " if modo_teste else ""
 
     logging.info("=" * 55)
-    logging.info(f"  Kion Dental — Alerta Churn  {'(MODO TESTE)' if modo_teste else ''}")
-    logging.info(f"  {datetime.now().strftime('%d/%m/%Y %H:%M')}  |  dry-run={DRY_RUN}")
+    logging.info(f"  Kion Dental — Alerta Faturamento  {'(MODO TESTE)' if modo_teste else ''}")
+    logging.info(f"  {datetime.now().strftime('%d/%m/%Y %H:%M')}  |  dry-run={DRY_RUN}  |  preview={PREVIEW}")
     logging.info("=" * 55)
 
     # 1. Ler dados
     df_cli, df_2025, df_2026 = ler_dados(cfg)
+    df_pedidos = ler_pedidos(cfg["caminhos"]["pedidos"])
 
     # 2. Processar
-    df_ativos, mes_ref = processar(df_cli, df_2025, df_2026, cfg)
+    df_ativos, mes_ref = processar(df_cli, df_2025, df_2026, df_pedidos, cfg)
 
-    enviados = 0
-    falhas   = 0
+    # ── Modo preview: salva HTMLs em disco sem enviar ─────────────────────
+    if PREVIEW:
+        preview_dir = os.path.join(BASE_DIR, "saidas", "preview_emails")
+        os.makedirs(preview_dir, exist_ok=True)
+        logging.info(f"Salvando previews em {preview_dir} ...")
 
-    # 3. E-mails por território
+        for cod, info in cfg["territorios"].items():
+            df_terr = df_ativos[df_ativos["vendas"] == cod]
+            if df_terr.empty:
+                continue
+            # Salva o relatório completo (anexo) como preview
+            html = gerar_relatorio_territorio(info["nome"], cod, df_terr, mes_ref, cfg, True)
+            path = os.path.join(preview_dir, f"{cod}_{info['nome']}.html")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(html)
+            logging.info(f"  ✅ {os.path.basename(path)}")
+
+        html_g = gerar_relatorio_gestor(df_ativos, mes_ref, cfg, True)
+        path_g = os.path.join(preview_dir, "GESTOR_Bruno.html")
+        with open(path_g, "w", encoding="utf-8") as f:
+            f.write(html_g)
+        logging.info(f"  ✅ {os.path.basename(path_g)}")
+        logging.info("=" * 55)
+        logging.info(f"  Preview completo — {len(cfg['territorios']) + 1} arquivos salvos")
+        logging.info("=" * 55)
+        return
+
+    # ── Envio normal ───────────────────────────────────────────────────────
+    enviados = falhas = 0
+
     logging.info("Gerando e-mails por território...")
     for cod, info in cfg["territorios"].items():
         df_terr = df_ativos[df_ativos["vendas"] == cod]
-
         if df_terr.empty:
             logging.info(f"  {cod} ({info['nome']}): sem clientes ativos, pulando")
             continue
 
-        em_risco = (df_terr["risco"].isin(["ALTO","MÉDIO"])).sum()
-        assunto  = (
+        n_alto  = (df_terr["risco"] == "ALTO").sum()
+        n_medio = (df_terr["risco"] == "MÉDIO").sum()
+        impacto = df_terr[df_terr["risco"].isin(["ALTO", "MÉDIO"])]["impacto_rs"].sum()
+        assunto = (
             f"{prefixo}[Churn Alert] {mes_ref.upper()} | "
             f"{cod} {info['nome']} | "
-            f"🔴 {(df_terr['risco']=='ALTO').sum()} | "
-            f"🟡 {(df_terr['risco']=='MÉDIO').sum()} | "
-            f"R$ {df_terr[df_terr['risco'].isin(['ALTO','MÉDIO'])]['impacto_rs'].sum():,.0f} em risco"
+            f"🔴 {n_alto} | 🟡 {n_medio} | R$ {impacto:,.0f} em risco"
         )
-        html  = gerar_email_territorio(info["nome"], cod, df_terr, mes_ref, cfg, modo_teste)
-        dests = cfg["emails_teste"] if modo_teste else [info["email"]]
+        nome_anexo  = f"Alerta_{cod}_{info['nome']}_{mes_ref.replace(' ','').upper()}.html"
+        html_corpo  = gerar_email_territorio(info["nome"], cod, df_terr, mes_ref, cfg, modo_teste,
+                                              nome_arquivo=nome_anexo)
+        html_relat  = gerar_relatorio_territorio(info["nome"], cod, df_terr, mes_ref, cfg, modo_teste)
+        dests       = cfg["emails_teste"] if modo_teste else [info["email"]]
 
-        ok = enviar_email(assunto, html, dests, cfg, DRY_RUN)
+        ok = enviar_email(assunto, html_corpo, dests, cfg, DRY_RUN,
+                          nome_anexo=nome_anexo, html_anexo=html_relat)
         if ok: enviados += 1
         else:  falhas   += 1
 
-    # 4. E-mail consolidado gestor
     logging.info("Gerando e-mail consolidado para o gestor...")
-    em_risco_total = df_ativos[df_ativos["risco"].isin(["ALTO","MÉDIO"])]
+    em_risco_total = df_ativos[df_ativos["risco"].isin(["ALTO", "MÉDIO"])]
     assunto_gestor = (
         f"{prefixo}[Churn CONSOLIDADO] {mes_ref.upper()} | "
         f"R$ {em_risco_total['impacto_rs'].sum():,.0f} em risco | "
-        f"🔴 {(df_ativos['risco']=='ALTO').sum()} | "
-        f"🟡 {(df_ativos['risco']=='MÉDIO').sum()}"
+        f"🔴 {(df_ativos['risco'] == 'ALTO').sum()} | "
+        f"🟡 {(df_ativos['risco'] == 'MÉDIO').sum()}"
     )
-    html_gestor = gerar_email_gestor(df_ativos, mes_ref, cfg, modo_teste)
-    dests_gestor = cfg["emails_teste"] if modo_teste else [cfg["gestor"]["email"]]
+    nome_anexo_g   = f"Alerta_CONSOLIDADO_{mes_ref.replace(' ','').upper()}.html"
+    html_gestor    = gerar_email_gestor(df_ativos, mes_ref, cfg, modo_teste, nome_arquivo=nome_anexo_g)
+    html_relat_g   = gerar_relatorio_gestor(df_ativos, mes_ref, cfg, modo_teste)
+    dests_gestor   = cfg["emails_teste"] if modo_teste else [cfg["gestor"]["email"]]
 
-    ok = enviar_email(assunto_gestor, html_gestor, dests_gestor, cfg, DRY_RUN)
+    ok = enviar_email(assunto_gestor, html_gestor, dests_gestor, cfg, DRY_RUN,
+                      nome_anexo=nome_anexo_g, html_anexo=html_relat_g)
     if ok: enviados += 1
     else:  falhas   += 1
 
-    # 5. Resumo
     logging.info("=" * 55)
     logging.info(f"  Concluído — {enviados} enviados | {falhas} falhas")
     logging.info("=" * 55)

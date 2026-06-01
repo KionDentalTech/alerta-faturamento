@@ -82,7 +82,16 @@ caminhos:
   clientes:       dados/clientes.xlsx
   producao_2025:  dados/producao_2025.xlsx
   producao_2026:  dados/producao_2026.xlsx
+  pedidos:        dados/Pedidos
   logs:           saidas/logs
+
+# ----------------------------------------------------------
+#  ENVIO
+#  anexar_html: true  → envia o HTML também como arquivo anexo no e-mail
+#  anexar_html: false → só o corpo do e-mail (padrão)
+# ----------------------------------------------------------
+envio:
+  anexar_html: true
 
 # ----------------------------------------------------------
 #  THRESHOLDS DE RISCO
