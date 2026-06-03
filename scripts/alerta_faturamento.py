@@ -1279,6 +1279,24 @@ def _tendencia_critica(df, show_vendas=False, cfg=None):
       </table></div>
     </div>"""
 
+    # TOP 5 — mais meses consecutivos abaixo da mediana de faturamento
+    df_meses = df[df["meses_queda"] > 0].sort_values("meses_queda", ascending=False).head(5)
+    rows_m = ""
+    for _, r in df_meses.iterrows():
+        rows_m += _row_cliente(r, show_vendas=show_vendas, cfg=cfg)
+    resp_th_m = "<th>Responsavel</th>" if show_vendas else ""
+    top5_meses_html = f"""
+    <div class="section">
+      <div class="section-hd" style="background:#fdf3e3;border-left:4px solid var(--laranja)">
+        <span style="font-size:16px">📅</span>
+        <span class="section-ttl">TOP 5 - Mais Meses Abaixo da Mediana</span>
+      </div>
+      <div class="tbl-wrap"><table>
+        {_cabecalho_tabela(show_vendas)}
+        <tbody>{rows_m or '<tr><td colspan="9" style="color:var(--suave)">Nenhum cliente com historico de queda</td></tr>'}</tbody>
+      </table></div>
+    </div>"""
+
     return f"""
     <div class="section">
       <div class="section-hd alto" style="border-left:4px solid #c0392b;margin-bottom:12px">
@@ -1287,6 +1305,7 @@ def _tendencia_critica(df, show_vendas=False, cfg=None):
       </div>
       {top5_casos_html}
       {top5_fat_html}
+      {top5_meses_html}
     </div>"""
 
 
