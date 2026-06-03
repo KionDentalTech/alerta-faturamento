@@ -431,9 +431,25 @@ def processar(df_cli, df_2025, df_2026, df_pedidos, cfg):
                 df_ativos[col] = 0
 
         # ── Projeção do mês atual ──────────────────────────────────────────
-        fat_proj, casos_proj = calcular_projecao(df_pedidos, mes_atual, hoje)
-        df_ativos["fat_projetado"]   = df_ativos["Cliente"].map(fat_proj).fillna(df_ativos["mes_atual"])
-        df_ativos["casos_projetados"] = df_ativos["Cliente"].map(casos_proj).fillna(df_ativos.get("casos_novos_atual", 0))
+        # Usa MRR atual do ERP como acumulado (mais preciso que pedidos não finalizados)
+        # Fórmula: acumulado + (acumulado ÷ dias_decorridos × dias_restantes)
+        periodo_atual = mes_str_to_period(mes_atual)
+        du_total  = dias_uteis_mes(periodo_atual.year, periodo_atual.month)
+        du_dec    = dias_uteis_ate(periodo_atual.year, periodo_atual.month, hoje)
+        du_rest   = du_total - du_dec
+
+        if du_dec > 0:
+            df_ativos["fat_projetado"] = (
+                df_ativos["mes_atual"] +
+                (df_ativos["mes_atual"] / du_dec * du_rest)
+            ).round(0)
+            df_ativos["casos_projetados"] = (
+                df_ativos["casos_novos_atual"] +
+                (df_ativos["casos_novos_atual"] / du_dec * du_rest)
+            ).clip(lower=0).round(0).astype(int)
+        else:
+            df_ativos["fat_projetado"]    = df_ativos["mes_atual"]
+            df_ativos["casos_projetados"] = df_ativos["casos_novos_atual"]
 
     else:
         for col in ["casos_novos_atual", "casos_mediana_12m", "casos_var_pct",
@@ -527,9 +543,7 @@ def _bloco_risco(df_terr, nivel, label_acao, show_vendas=False, cfg=None) -> str
             sub_row = f"""
         <tr class="op-row">
           <td style="color:#888;font-style:italic">{tabela}</td>
-          <td><strong style="color:#00B1D2">{casos}</strong>
-              &nbsp;<span style="color:#ccc">|</span>&nbsp;
-              <span style="color:#aaa">proj {casos_prj}</span></td>
+          <td><strong style="color:#00B1D2">{casos}</strong></td>
           <td>{casos_prj}</td>
           <td style="color:#aaa">{casos_med:.0f}</td>
           <td>{vc_str}</td>
@@ -942,7 +956,7 @@ def _bloco_risco_relatorio(df_terr, nivel, label_acao, show_vendas=False, cfg=No
             sub_row = f"""<tr class="op-row">
               <td style="font-style:italic;color:var(--suave)">{tabela}</td>
               {f"<td></td>" if show_vendas else ""}
-              <td><strong style="color:var(--azul)">{casos}</strong>&nbsp;<span style="color:#ccc">|</span>&nbsp;<span style="color:var(--suave)">proj {casos_prj}</span></td>
+              <td><strong style="color:var(--azul)">{casos}</strong></td>
               <td style="color:var(--suave)">{casos_prj}</td>
               <td style="color:var(--suave)">{casos_med:.0f}</td>
               <td>{vc_str}</td>
