@@ -1232,26 +1232,24 @@ def _tendencia_critica(df, show_vendas=False, cfg=None):
     vazio = f'<tr><td colspan="9" style="color:var(--suave);padding:12px">Sem dados suficientes</td></tr>'
 
     # ── Filho 1: TOP 5 queda de casos novos ──────────────────────────────
-    filho1 = ""
-    tem_casos = "casos_novos_atual" in df.columns and df["casos_novos_atual"].sum() > 0
-    if tem_casos:
+    rows_c = ""
+    if "casos_novos_atual" in df.columns and "casos_mediana_12m" in df.columns:
         df_casos = df[
-            (df.get("casos_mediana_12m", pd.Series([0])) > 0) &
-            (df["casos_novos_atual"] < df.get("casos_mediana_12m", pd.Series([0])))
+            (df["casos_mediana_12m"].fillna(0) > 0) &
+            (df["casos_novos_atual"].fillna(0) < df["casos_mediana_12m"].fillna(0))
         ].copy()
         df_casos["queda_casos"] = df_casos["casos_mediana_12m"] - df_casos["casos_novos_atual"]
-        rows_c = ""
         for _, r in df_casos.sort_values("queda_casos", ascending=False).head(5).iterrows():
-            casos  = int(r.get("casos_novos_atual") or 0)
+            casos   = int(r.get("casos_novos_atual") or 0)
             casos_p = int(r.get("casos_projetados") or 0)
-            med_c  = float(r.get("casos_mediana_12m") or 0)
-            var_c  = r.get("casos_var_pct")
-            mq_c   = int(r.get("casos_meses_queda") or 0)
-            vc_str = f"{var_c:+.0f}%" if var_c is not None and not pd.isna(var_c) else "—"
-            tabela = str(r.get("tabela") or ""); tabela = "" if pd.isna(r.get("tabela")) else tabela
-            resp_c = ""
+            med_c   = float(r.get("casos_mediana_12m") or 0)
+            var_c   = r.get("casos_var_pct")
+            mq_c    = int(r.get("casos_meses_queda") or 0)
+            vc_str  = f"{var_c:+.0f}%" if var_c is not None and not pd.isna(var_c) else "—"
+            tabela  = str(r.get("tabela") or ""); tabela = "" if pd.isna(r.get("tabela")) else tabela
+            resp_c  = ""
             if show_vendas and cfg:
-                terr = str(r.get("vendas") or "—")
+                terr   = str(r.get("vendas") or "—")
                 nome_r = cfg.get("territorios", {}).get(terr, {}).get("nome", terr) if terr != "—" else "—"
                 resp_c = f"<td><strong style='color:var(--azul)'>{terr}</strong> {nome_r}</td>"
             rows_c += (
@@ -1265,15 +1263,15 @@ def _tendencia_critica(df, show_vendas=False, cfg=None):
                 f"<td style='color:var(--suave)'>{mq_c}m</td>"
                 f"</tr>"
             )
-        filho1 = _tc_filho("📋", "TOP 5 - Queda de Casos Novos", f"""
-          <div class="tbl-wrap"><table>
-            <thead><tr>
-              <th style="width:30%">Cliente</th>{resp_th}
-              <th>Casos Novos</th><th>Proj. Casos</th>
-              <th>Med. 12M</th><th>Variacao</th><th>Meses &darr;</th>
-            </tr></thead>
-            <tbody>{rows_c or vazio}</tbody>
-          </table></div>""")
+    filho1 = _tc_filho("📋", "TOP 5 - Queda de Casos Novos", f"""
+      <div class="tbl-wrap"><table>
+        <thead><tr>
+          <th style="width:30%">Cliente</th>{resp_th}
+          <th>Casos Novos</th><th>Proj. Casos</th>
+          <th>Med. 12M</th><th>Variacao</th><th>Meses &darr;</th>
+        </tr></thead>
+        <tbody>{rows_c or vazio}</tbody>
+      </table></div>""")
 
     # ── Filho 2: TOP 5 queda de faturamento ──────────────────────────────
     rows_f = "".join(
