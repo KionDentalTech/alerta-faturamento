@@ -418,11 +418,11 @@ def processar(df_cli, df_2025, df_2026, df_pedidos, cfg):
     )
     df["risco"] = df.apply(lambda r: calcular_nivel_risco(r, cfg, mes_atual), axis=1)
 
-    # ── Clientes ativos: faturou em pelo menos 1 dos ultimos 6 meses ─────────
-    ultimos_6 = [m for m in janela if m in df.columns][-6:]
-    df["ativo_6m"] = df[ultimos_6].apply(lambda r: (r > 0).any(), axis=1)
-    df_ativos = df[df["ativo_6m"]].copy()
-    logging.info(f"  Clientes ativos (ultimos 6 meses): {len(df_ativos):,}")
+    # ── Clientes ativos: faturou em pelo menos 1 dos ultimos 4 meses ─────────
+    ultimos_4 = [m for m in janela if m in df.columns][-4:]
+    df["ativo_4m"] = df[ultimos_4].apply(lambda r: (r > 0).any(), axis=1)
+    df_ativos = df[df["ativo_4m"]].copy()
+    logging.info(f"  Clientes ativos (ultimos 4 meses): {len(df_ativos):,}")
 
     # ── Metricas de pedidos ────────────────────────────────────────────────
     if not df_pedidos.empty:
