@@ -937,11 +937,6 @@ def _kpi_row_relatorio(fat_total, fat_proj, total_ativos, n_alto, n_medio,
         <div class="kpi-val kpi-red">R$ {brl(fat_risco)}</div>
         <div class="kpi-sub">{fat_risco/fat_total*100:.1f}% da carteira</div>
       </div>
-      <div class="kpi-card risco">
-        <div class="kpi-lbl">Impacto vs. Mediana</div>
-        <div class="kpi-val kpi-red">-R$ {brl(impacto_total)}</div>
-        <div class="kpi-sub">por mes</div>
-      </div>
       {f'''<div class="kpi-card destaque">
         <div class="kpi-lbl">Casos Novos</div>
         <div class="kpi-val">{total_casos}</div>
@@ -1280,11 +1275,6 @@ def _corpo_simples(titulo, subtitulo, mes_ref, fat_total, fat_proj,
           <div class="kpi-label">Fat. em Risco</div>
           <div class="kpi-value" style="color:#c0392b">R$ {brl(fat_risco)}</div>
           <div class="kpi-sub">{fat_risco/fat_total*100:.1f}% da carteira</div>
-        </td>
-        <td style="padding:12px 14px;vertical-align:top">
-          <div class="kpi-label">Impacto vs. Mediana</div>
-          <div class="kpi-value" style="color:#c0392b">-R$ {brl(impacto)}</div>
-          <div class="kpi-sub">por mes</div>
         </td>
       </tr>
     </table>
