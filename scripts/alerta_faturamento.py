@@ -909,9 +909,10 @@ def _footer(mes_ref):
     )
 
 
-def _kpi_row_relatorio(fat_total, fat_proj, total_ativos, n_alto, n_medio,
-                       n_atenc, fat_risco, impacto_total, total_casos, casos_proj, n_bloqueados, mes_ref):
+def _kpi_row_relatorio(fat_total, fat_proj, total_ativos, n_queda, _unused1,
+                       _unused2, fat_risco, _unused3, total_casos, casos_proj, n_bloqueados, mes_ref):
     """KPI cards para o relatorio HTML standalone (CSS moderno)."""
+    pct = f"{fat_risco/fat_total*100:.1f}%" if fat_total > 0 else "0%"
     return f"""
     <div class="kpi-row">
       <div class="kpi-card destaque">
@@ -924,18 +925,9 @@ def _kpi_row_relatorio(fat_total, fat_proj, total_ativos, n_alto, n_medio,
         <div class="kpi-val">{total_ativos}</div>
       </div>
       <div class="kpi-card risco">
-        <div class="kpi-lbl">Em Risco</div>
-        <div class="kpi-val kpi-red">{n_alto + n_medio}</div>
-        <div class="kpi-sub">
-          <span class="bdg bdg-alto">&#128308; {n_alto}</span>
-          <span class="bdg bdg-medio">&#128993; {n_medio}</span>
-          {f'<span class="bdg bdg-atenc">&#128994; {n_atenc}</span>' if n_atenc > 0 else ''}
-        </div>
-      </div>
-      <div class="kpi-card risco">
-        <div class="kpi-lbl">Fat. em Risco</div>
-        <div class="kpi-val kpi-red">R$ {brl(fat_risco)}</div>
-        <div class="kpi-sub">{fat_risco/fat_total*100:.1f}% da carteira</div>
+        <div class="kpi-lbl">Clientes em Queda</div>
+        <div class="kpi-val kpi-red">{n_queda}</div>
+        <div class="kpi-sub">proj abaixo da mediana</div>
       </div>
       {f'''<div class="kpi-card destaque">
         <div class="kpi-lbl">Casos Novos</div>
@@ -1104,31 +1096,182 @@ def _footer_relatorio(mes_ref):
     </div>"""
 
 
+def _row_cliente(r, show_vendas=False, cfg=None):
+    """Linha de cliente para a tabela Mes Corrente."""
+    fat_proj  = float(r.get("fat_projetado") or r["mes_atual"])
+    casos     = int(r.get("casos_novos_atual") or 0)
+    adj_pct   = float(r.get("adj_pct_atual") or 0)
+    rep_pct   = float(r.get("rep_pct_atual") or 0)
+    vf        = r["variacao_pct"] if not pd.isna(r.get("variacao_pct")) else 0
+    cor_vf    = "neg" if vf < 0 else "pos"
+
+    status = str(r.get("status_financeiro") or "Ativo")
+    st_badge = ""
+    if status == "Bloqueado":
+        mot = str(r.get("motivo_bloqueio") or "")
+        mot_txt = f" · {mot}" if mot and mot != "nan" else ""
+        st_badge = f' <span class="st-bloq">&#128683; BLOQUEADO{mot_txt}</span>'
+    elif status == "Inativo":
+        st_badge = ' <span class="st-inat">INATIVO</span>'
+
+    resp_cell = ""
+    if show_vendas and cfg:
+        terr = str(r.get("vendas") or "—")
+        nome_r = cfg.get("territorios", {}).get(terr, {}).get("nome", terr) if terr != "—" else "—"
+        resp_cell = f"<td><strong style='color:var(--azul)'>{terr}</strong><br><span style='color:var(--suave);font-size:11px'>{nome_r}</span></td>"
+
+    adj_cl = "neg" if adj_pct > 20 else ""
+    rep_cl = "neg" if rep_pct > 20 else ""
+    tabela = str(r.get("tabela") or "")
+    if pd.isna(r.get("tabela")): tabela = ""
+
+    return f"""<tr>
+      <td style="padding:8px 10px 4px">
+        <strong style="font-size:12px">{r['Cliente']}</strong>{st_badge}<br>
+        <span style="font-size:10px;color:var(--suave)">{tabela}</span>
+      </td>
+      {resp_cell}
+      <td style="font-weight:700">R$ {brl(r['mes_atual'])}</td>
+      <td style="color:var(--suave)">R$ {brl(fat_proj)}</td>
+      <td style="color:var(--suave)">R$ {brl(r['media_12m'])}</td>
+      <td class="{cor_vf}" style="font-weight:700">{vf:+.0f}%</td>
+      <td style="color:var(--suave)">{int(r['meses_queda'])}m</td>
+      <td class="neg" style="font-weight:700">-R$ {brl(r['impacto_rs'])}</td>
+      <td style="color:var(--azul);font-weight:700">{casos}</td>
+      <td><span class="{adj_cl}">Adj {adj_pct:.0f}%</span> <span class="{rep_cl}">Rep {rep_pct:.0f}%</span></td>
+    </tr>"""
+
+
+def _cabecalho_tabela(show_vendas=False):
+    resp_th = "<th>Responsavel</th>" if show_vendas else ""
+    return f"""<thead>
+      <tr>
+        <th style="width:26%">Cliente</th>{resp_th}
+        <th>MRR Atual</th><th>Proj. Mes</th><th>Mediana 12M</th>
+        <th>Variacao</th><th>Meses &darr;</th><th>Impacto/mes</th>
+        <th>Casos</th><th>Qualidade</th>
+      </tr>
+    </thead>"""
+
+
+def _tendencia_critica(df, show_vendas=False, cfg=None):
+    """TOP 5 queda de casos novos + TOP 5 queda de faturamento."""
+
+    # TOP 5 - queda de casos novos (maior queda percentual)
+    tem_casos = "casos_novos_atual" in df.columns and df["casos_novos_atual"].sum() > 0
+    top5_casos_html = ""
+    if tem_casos:
+        df_casos = df[
+            (df.get("casos_mediana_12m", pd.Series([0])) > 0) &
+            (df["casos_novos_atual"] < df.get("casos_mediana_12m", pd.Series([0])))
+        ].copy()
+        df_casos["queda_casos"] = (
+            df_casos["casos_mediana_12m"] - df_casos["casos_novos_atual"]
+        )
+        top5_c = df_casos.sort_values("queda_casos", ascending=False).head(5)
+        rows_c = ""
+        for _, r in top5_c.iterrows():
+            casos    = int(r.get("casos_novos_atual") or 0)
+            casos_p  = int(r.get("casos_projetados") or 0)
+            med_c    = float(r.get("casos_mediana_12m") or 0)
+            var_c    = r.get("casos_var_pct")
+            mq_c     = int(r.get("casos_meses_queda") or 0)
+            vc_str   = f"{var_c:+.0f}%" if var_c is not None and not pd.isna(var_c) else "—"
+            tabela   = str(r.get("tabela") or "")
+            if pd.isna(r.get("tabela")): tabela = ""
+            resp_c   = ""
+            if show_vendas and cfg:
+                terr = str(r.get("vendas") or "—")
+                nome_r = cfg.get("territorios", {}).get(terr, {}).get("nome", terr) if terr != "—" else "—"
+                resp_c = f"<td><strong style='color:var(--azul)'>{terr}</strong> {nome_r}</td>"
+            rows_c += (
+                f"<tr>"
+                f"<td><strong>{r['Cliente']}</strong><br><span style='color:var(--suave);font-size:10px'>{tabela}</span></td>"
+                f"{resp_c}"
+                f"<td style='font-weight:700;color:var(--azul)'>{casos}</td>"
+                f"<td style='color:var(--suave)'>{casos_p}</td>"
+                f"<td style='color:var(--suave)'>{med_c:.0f}</td>"
+                f"<td class='neg' style='font-weight:700'>{vc_str}</td>"
+                f"<td style='color:var(--suave)'>{mq_c}m</td>"
+                f"</tr>"
+            )
+        resp_th_c = "<th>Responsavel</th>" if show_vendas else ""
+        top5_casos_html = f"""
+        <div class="section">
+          <div class="section-hd alto">
+            <span style="font-size:16px">📋</span>
+            <span class="section-ttl">TOP 5 - Queda de Casos Novos</span>
+          </div>
+          <div class="tbl-wrap"><table>
+            <thead><tr>
+              <th style="width:30%">Cliente</th>{resp_th_c}
+              <th>Casos Novos</th><th>Proj. Casos</th>
+              <th>Med. 12M</th><th>Variacao</th><th>Meses &darr;</th>
+            </tr></thead>
+            <tbody>{rows_c}</tbody>
+          </table></div>
+        </div>"""
+
+    # TOP 5 - queda de faturamento (maior impacto em R$)
+    df_fat = df[df["impacto_rs"] > 0].sort_values("impacto_rs", ascending=False).head(5)
+    rows_f = ""
+    for _, r in df_fat.iterrows():
+        rows_f += _row_cliente(r, show_vendas=show_vendas, cfg=cfg)
+    resp_th_f = "<th>Responsavel</th>" if show_vendas else ""
+    top5_fat_html = f"""
+    <div class="section">
+      <div class="section-hd medio">
+        <span style="font-size:16px">💰</span>
+        <span class="section-ttl">TOP 5 - Queda de Faturamento</span>
+      </div>
+      <div class="tbl-wrap"><table>
+        {_cabecalho_tabela(show_vendas)}
+        <tbody>{rows_f or '<tr><td colspan="9" style="color:var(--suave)">Nenhum cliente em queda</td></tr>'}</tbody>
+      </table></div>
+    </div>"""
+
+    return f"""
+    <div class="section">
+      <div class="section-hd alto" style="border-left:4px solid #c0392b;margin-bottom:12px">
+        <span style="font-size:15px">⚠️</span>
+        <span class="section-ttl" style="font-size:14px">TENDENCIA CRITICA</span>
+      </div>
+      {top5_casos_html}
+      {top5_fat_html}
+    </div>"""
+
+
+def _tabela_mes_corrente(df, mes_ref, show_vendas=False, cfg=None):
+    """Todos os clientes ordenados por impacto/mes decrescente."""
+    df_sorted = df.sort_values("impacto_rs", ascending=False)
+    rows = "".join(_row_cliente(r, show_vendas=show_vendas, cfg=cfg) for _, r in df_sorted.iterrows())
+    return f"""
+    <div class="section">
+      <div class="section-hd atenc">
+        <span style="font-size:16px">📊</span>
+        <span class="section-ttl">MES CORRENTE — {mes_ref.upper()}</span>
+        <span class="section-cnt">{len(df)} clientes | ordenado por impacto</span>
+      </div>
+      <div class="tbl-wrap"><table>
+        {_cabecalho_tabela(show_vendas)}
+        <tbody>{rows}</tbody>
+      </table></div>
+    </div>"""
+
+
 def gerar_relatorio_territorio(nome_resp, codigo, df_terr, mes_ref, cfg, modo_teste):
     """HTML completo e moderno para o arquivo ANEXO (abre no browser)."""
-    total_ativos  = len(df_terr)
-    em_risco      = df_terr[df_terr["risco"].isin(["ALTO", "MEDIO"])]
-    fat_risco     = em_risco["mes_atual"].sum()
-    impacto_total = em_risco["impacto_rs"].sum()
-    fat_total     = df_terr["mes_atual"].sum()
-    fat_proj      = float(df_terr.get("fat_projetado", df_terr["mes_atual"]).sum())
-    n_alto        = (df_terr["risco"] == "ALTO").sum()
-    n_medio       = (df_terr["risco"] == "MEDIO").sum()
-    n_atenc       = (df_terr["risco"] == "ATENCAO").sum()
-    n_bloqueados  = (df_terr.get("status_financeiro", pd.Series([])).astype(str) == "Bloqueado").sum()
-    total_casos   = int(df_terr.get("casos_novos_atual", pd.Series([0])).sum())
-    casos_proj    = int(df_terr.get("casos_projetados", pd.Series([0])).sum())
+    fat_total    = df_terr["mes_atual"].sum()
+    fat_proj     = float(df_terr.get("fat_projetado", df_terr["mes_atual"]).sum())
+    total_ativos = len(df_terr)
+    n_bloqueados = (df_terr.get("status_financeiro", pd.Series([])).astype(str) == "Bloqueado").sum()
+    total_casos  = int(df_terr.get("casos_novos_atual", pd.Series([0])).sum())
+    casos_proj   = int(df_terr.get("casos_projetados", pd.Series([0])).sum())
+    n_queda      = (df_terr["variacao_pct"].fillna(0) < 0).sum()
+    fat_risco    = df_terr[df_terr["impacto_rs"] > 0]["mes_atual"].sum()
 
-    banner = ""  # banner de teste removido
-
-    blocos = (
-        _bloco_risco_relatorio(df_terr, "ALTO",    "LIGAR HOJE") +
-        _bloco_risco_relatorio(df_terr, "MEDIO",   "CHECK-IN ESTA SEMANA") +
-        _bloco_risco_relatorio(df_terr, "ATENCAO", "MONITORAR")
-    ) or "<p style='color:var(--verde);font-size:13px'>✅ Nenhum cliente em risco no momento.</p>"
-
-    kpis = _kpi_row_relatorio(fat_total, fat_proj, total_ativos, n_alto, n_medio,
-                               n_atenc, fat_risco, impacto_total, total_casos, casos_proj, n_bloqueados, mes_ref)
+    kpis = _kpi_row_relatorio(fat_total, fat_proj, total_ativos, n_queda, 0,
+                               0, fat_risco, 0, total_casos, casos_proj, n_bloqueados, mes_ref)
 
     return f"""<!DOCTYPE html>
 <html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1139,11 +1282,11 @@ def gerar_relatorio_territorio(nome_resp, codigo, df_terr, mes_ref, cfg, modo_te
 <div class="container">
   {_header_relatorio('Monitoramento de Faturamento')}
   <div class="rpt-body">
-    {banner}
     <p class="rpt-title">Alerta de Faturamento — {nome_resp} ({codigo})</p>
     <p class="rpt-subtitle">{mes_ref.upper()} | Carteira do responsavel | Gerado em {datetime.now().strftime('%d/%m/%Y %H:%M')}</p>
     {kpis}
-    {blocos}
+    {_tendencia_critica(df_terr)}
+    {_tabela_mes_corrente(df_terr, mes_ref)}
     {_legenda_relatorio()}
   </div>
   {_footer_relatorio(mes_ref)}
@@ -1153,49 +1296,34 @@ def gerar_relatorio_territorio(nome_resp, codigo, df_terr, mes_ref, cfg, modo_te
 
 def gerar_relatorio_gestor(df_ativos, mes_ref, cfg, modo_teste):
     """HTML completo e moderno para o arquivo ANEXO do gestor."""
-    em_risco      = df_ativos[df_ativos["risco"].isin(["ALTO", "MEDIO"])]
-    fat_total     = df_ativos["mes_atual"].sum()
-    fat_proj      = float(df_ativos.get("fat_projetado", df_ativos["mes_atual"]).sum())
-    fat_risco     = em_risco["mes_atual"].sum()
-    impacto_tot   = em_risco["impacto_rs"].sum()
-    n_bloqueados  = (df_ativos.get("status_financeiro", pd.Series([])).astype(str) == "Bloqueado").sum()
-    casos_total   = int(df_ativos.get("casos_novos_atual", pd.Series([0])).sum())
-    casos_proj_t  = int(df_ativos.get("casos_projetados", pd.Series([0])).sum())
-    n_alto        = (df_ativos["risco"] == "ALTO").sum()
-    n_medio       = (df_ativos["risco"] == "MEDIO").sum()
-    n_atenc       = (df_ativos["risco"] == "ATENCAO").sum()
+    fat_total    = df_ativos["mes_atual"].sum()
+    fat_proj     = float(df_ativos.get("fat_projetado", df_ativos["mes_atual"]).sum())
+    n_bloqueados = (df_ativos.get("status_financeiro", pd.Series([])).astype(str) == "Bloqueado").sum()
+    casos_total  = int(df_ativos.get("casos_novos_atual", pd.Series([0])).sum())
+    casos_proj_t = int(df_ativos.get("casos_projetados", pd.Series([0])).sum())
+    n_queda      = (df_ativos["variacao_pct"].fillna(0) < 0).sum()
 
-    banner = ""  # banner de teste removido
-
-    # Tabela de resumo por territorio
+    # Resumo por territorio
     linhas_terr = ""
     for cod, info in cfg["territorios"].items():
         t = df_ativos[df_ativos["vendas"] == cod]
-        t_risco = t[t["risco"].isin(["ALTO", "MEDIO"])]
         if t.empty: continue
         t_fp   = float(t.get("fat_projetado", t["mes_atual"]).sum())
         t_cas  = int(t.get("casos_novos_atual", pd.Series([0])).sum())
         t_bloq = (t.get("status_financeiro", pd.Series([])).astype(str) == "Bloqueado").sum()
+        t_queda = (t["variacao_pct"].fillna(0) < 0).sum()
         bloq_s = f' <span class="st-bloq" style="font-size:9px">&#128683; {t_bloq}</span>' if t_bloq > 0 else ""
         linhas_terr += (
             f"<tr><td><strong style='color:var(--azul)'>{cod}</strong> {info['nome']}</td>"
             f"<td style='font-weight:600'>R$ {brl(t['mes_atual'].sum())}"
             f"<br><span style='font-size:10px;color:var(--suave)'>Proj: R$ {brl(t_fp)}</span></td>"
             f"<td>{len(t)}{bloq_s}</td>"
-            f"<td><span class='bdg bdg-alto'>{(t['risco']=='ALTO').sum()}</span> "
-            f"<span class='bdg bdg-medio'>{(t['risco']=='MEDIO').sum()}</span></td>"
-            f"<td class='neg' style='font-weight:700'>-R$ {brl(t_risco['impacto_rs'].sum())}</td>"
-            f"<td style='color:var(--suave)'>{t_cas if t_cas > 0 else '—'}</td></tr>"
+            f"<td class='neg'>{t_queda}</td>"
+            f"<td>{t_cas if t_cas > 0 else '—'}</td></tr>"
         )
 
-    kpis = _kpi_row_relatorio(fat_total, fat_proj, len(df_ativos), n_alto, n_medio,
-                               n_atenc, fat_risco, impacto_tot, casos_total, casos_proj_t, n_bloqueados, mes_ref)
-
-    blocos = (
-        _bloco_risco_relatorio(df_ativos, "ALTO",    "LIGAR HOJE",           show_vendas=True, cfg=cfg) +
-        _bloco_risco_relatorio(df_ativos, "MEDIO",   "CHECK-IN ESTA SEMANA", show_vendas=True, cfg=cfg) +
-        _bloco_risco_relatorio(df_ativos, "ATENCAO", "MONITORAR",            show_vendas=True, cfg=cfg)
-    )
+    kpis = _kpi_row_relatorio(fat_total, fat_proj, len(df_ativos), n_queda, 0,
+                               0, 0, 0, casos_total, casos_proj_t, n_bloqueados, mes_ref)
 
     return f"""<!DOCTYPE html>
 <html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1206,7 +1334,6 @@ def gerar_relatorio_gestor(df_ativos, mes_ref, cfg, modo_teste):
 <div class="container">
   {_header_relatorio('Visao Consolidada')}
   <div class="rpt-body">
-    {banner}
     <p class="rpt-title">Alerta de Faturamento — Visao Consolidada</p>
     <p class="rpt-subtitle">{mes_ref.upper()} | Todos os territorios | Gerado em {datetime.now().strftime('%d/%m/%Y %H:%M')}</p>
     {kpis}
@@ -1216,13 +1343,14 @@ def gerar_relatorio_gestor(df_ativos, mes_ref, cfg, modo_teste):
       </div>
       <div class="tbl-wrap"><table>
         <thead><tr>
-          <th>Territorio</th><th>Faturamento / Proj.</th><th>Ativos</th>
-          <th>Em Risco</th><th>Impacto</th><th>Casos Novos</th>
+          <th>Territorio</th><th>Faturamento / Proj.</th>
+          <th>Ativos</th><th>Em Queda</th><th>Casos Novos</th>
         </tr></thead>
         <tbody>{linhas_terr}</tbody>
       </table></div>
     </div>
-    {blocos}
+    {_tendencia_critica(df_ativos, show_vendas=True, cfg=cfg)}
+    {_tabela_mes_corrente(df_ativos, mes_ref, show_vendas=True, cfg=cfg)}
     {_legenda_relatorio()}
   </div>
   {_footer_relatorio(mes_ref)}
