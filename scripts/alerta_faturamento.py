@@ -253,7 +253,12 @@ def calcular_metricas_pedidos(df_pedidos: pd.DataFrame, janela: list) -> pd.Data
 
 def calcular_projecao(df_pedidos: pd.DataFrame, mes_str: str, hoje: pd.Timestamp):
     """
-    Calcula faturamento projetado e casos novos projetados para um mês em andamento.
+    Projeta faturamento e casos novos para o mês em andamento.
+
+    Fórmula:
+        taxa_diaria  = acumulado ÷ dias_úteis_decorridos
+        projeção     = acumulado + (taxa_diaria × dias_úteis_restantes)
+
     Retorna (serie_fat_projetado, serie_casos_projetados) indexadas por Cliente.
     """
     if df_pedidos.empty:
@@ -262,24 +267,28 @@ def calcular_projecao(df_pedidos: pd.DataFrame, mes_str: str, hoje: pd.Timestamp
     periodo = mes_str_to_period(mes_str)
     ano, mes = periodo.year, periodo.month
 
-    du_total    = dias_uteis_mes(ano, mes)
-    du_ate_hoje = dias_uteis_ate(ano, mes, hoje)
+    du_total     = dias_uteis_mes(ano, mes)
+    du_decorridos = dias_uteis_ate(ano, mes, hoje)
+    du_restantes  = du_total - du_decorridos
 
-    if du_ate_hoje == 0:
+    if du_decorridos == 0:
         return pd.Series(dtype=float), pd.Series(dtype=float)
 
-    fator = du_total / du_ate_hoje
-    dm    = df_pedidos[df_pedidos["mes_period"] == periodo]
+    dm = df_pedidos[df_pedidos["mes_period"] == periodo]
 
-    # Faturamento: soma de Valor total de pedidos Finalizados
-    dm_fat  = dm[dm["status_pedido"] == "Finalizado"]
+    # ── Faturamento projetado ──────────────────────────────────────────────
+    dm_fat   = dm[dm["status_pedido"] == "Finalizado"]
     fat_acum = dm_fat.groupby("Cliente")["valor_total"].sum()
-    fat_proj = (fat_acum * fator).round(0)
 
-    # Casos novos: contagem de pedidos novos (sem R/A)
+    taxa_fat = fat_acum / du_decorridos                        # R$/dia útil
+    fat_proj = (fat_acum + taxa_fat * du_restantes).round(0)   # acumulado + restante estimado
+
+    # ── Casos novos projetados ─────────────────────────────────────────────
     dm_novos   = dm[dm["tipo"] == "novo"]
     casos_acum = dm_novos.groupby("Cliente")["Nº pedido"].count()
-    casos_proj = (casos_acum * fator).round(0)
+
+    taxa_casos  = casos_acum / du_decorridos
+    casos_proj  = (casos_acum + taxa_casos * du_restantes).round(0)
 
     return fat_proj, casos_proj
 
