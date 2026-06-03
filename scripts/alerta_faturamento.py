@@ -910,15 +910,29 @@ def _footer(mes_ref):
 
 
 def _kpi_row_relatorio(fat_total, fat_proj, total_ativos, n_queda, _unused1,
-                       _unused2, fat_risco, _unused3, total_casos, casos_proj, n_bloqueados, mes_ref):
+                       _unused2, fat_risco, _unused3, total_casos, casos_proj, n_bloqueados, mes_ref,
+                       meta=None):
     """KPI cards para o relatorio HTML standalone (CSS moderno)."""
-    pct = f"{fat_risco/fat_total*100:.1f}%" if fat_total > 0 else "0%"
+    # Meta e % de atingimento
+    meta_html = ""
+    if meta and meta > 0:
+        pct_proj = fat_proj / meta * 100
+        cor_meta = "var(--verde)" if pct_proj >= 100 else ("var(--laranja)" if pct_proj >= 70 else "var(--vermelho)")
+        meta_html = (
+            f"<div style='margin-top:4px;padding-top:4px;border-top:1px solid var(--borda)'>"
+            f"<span style='font-size:9px;color:var(--suave);text-transform:uppercase;letter-spacing:.5px'>Meta</span>"
+            f"<br><span style='font-size:12px;font-weight:600;color:var(--suave)'>R$ {brl(meta)}</span>"
+            f"&nbsp;<span style='font-size:12px;font-weight:700;color:{cor_meta}'>{pct_proj:.0f}%</span>"
+            f"</div>"
+        )
+
     return f"""
     <div class="kpi-row">
       <div class="kpi-card destaque">
         <div class="kpi-lbl">Faturamento {mes_ref}</div>
         <div class="kpi-val">R$ {brl(fat_total)}</div>
         <div class="kpi-sub">Proj: R$ {brl(fat_proj)}</div>
+        {meta_html}
       </div>
       <div class="kpi-card">
         <div class="kpi-lbl">Clientes Ativos</div>
@@ -1305,8 +1319,11 @@ def gerar_relatorio_territorio(nome_resp, codigo, df_terr, mes_ref, cfg, modo_te
     n_queda      = (df_terr["variacao_pct"].fillna(0) < 0).sum()
     fat_risco    = df_terr[df_terr["impacto_rs"] > 0]["mes_atual"].sum()
 
+    meta = cfg.get("metas", {}).get(mes_ref, {}).get(codigo, None)
+
     kpis = _kpi_row_relatorio(fat_total, fat_proj, total_ativos, n_queda, 0,
-                               0, fat_risco, 0, total_casos, casos_proj, n_bloqueados, mes_ref)
+                               0, fat_risco, 0, total_casos, casos_proj, n_bloqueados, mes_ref,
+                               meta=meta)
 
     return f"""<!DOCTYPE html>
 <html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1357,8 +1374,11 @@ def gerar_relatorio_gestor(df_ativos, mes_ref, cfg, modo_teste):
             f"<td>{t_cas if t_cas > 0 else '—'}</td></tr>"
         )
 
+    meta_total = sum(cfg.get("metas", {}).get(mes_ref, {}).values()) or None
+
     kpis = _kpi_row_relatorio(fat_total, fat_proj, len(df_ativos), n_queda, 0,
-                               0, 0, 0, casos_total, casos_proj_t, n_bloqueados, mes_ref)
+                               0, 0, 0, casos_total, casos_proj_t, n_bloqueados, mes_ref,
+                               meta=meta_total)
 
     return f"""<!DOCTYPE html>
 <html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">

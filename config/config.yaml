@@ -101,6 +101,22 @@ envio:
   anexar_html: true
 
 # ----------------------------------------------------------
+#  METAS MENSAIS POR TERRITORIO
+#  Adicione o mes no formato "mmm aaaa" e os valores por codigo
+# ----------------------------------------------------------
+metas:
+  jun 2026:
+    IS1: 600000
+    IS2: 370000
+    IS3: 475000
+    T1:  300000
+    T2:  270000
+    T3:  480000
+    T4:  145000
+    T5:  400000
+    T6:  310000
+
+# ----------------------------------------------------------
 #  THRESHOLDS DE RISCO
 #  Ajuste conforme experiência do time
 # ----------------------------------------------------------
