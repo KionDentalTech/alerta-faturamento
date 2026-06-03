@@ -306,16 +306,33 @@ def detectar_mes_atual(df_2026):
 
 
 def meses_consecutivos_queda(row, cols_janela: list, col_atual: str) -> int:
-    """Conta meses seguidos de queda antes do mês atual (genérico para qualquer conjunto de colunas)."""
+    """
+    Conta meses FECHADOS consecutivos onde o faturamento/casos ficaram
+    abaixo da mediana histórica (não compara com o mês atual parcial).
+
+    - Para faturamento: compara cada mês fechado vs media_12m
+    - Para casos:       compara cada mês fechado vs casos_mediana_12m
+    """
     if col_atual not in cols_janela:
         return 0
-    idx              = cols_janela.index(col_atual)
+    idx = cols_janela.index(col_atual)
+    if idx == 0:
+        return 0
     meses_anteriores = list(reversed(cols_janela[:idx]))
-    val_atual        = row.get(col_atual, 0)
+
+    # Seleciona a mediana correta conforme o tipo de coluna
+    if col_atual.startswith("casos_"):
+        media = float(row.get("casos_mediana_12m") or 0)
+    else:
+        media = float(row.get("media_12m") or 0)
+
+    if media == 0:
+        return 0
+
     count = 0
     for col in meses_anteriores:
-        val = row.get(col, 0)
-        if val > 0 and val_atual < val:
+        val = float(row.get(col) or 0)
+        if val > 0 and val < media:
             count += 1
         else:
             break
@@ -324,7 +341,7 @@ def meses_consecutivos_queda(row, cols_janela: list, col_atual: str) -> int:
 
 def calcular_nivel_risco(row, cfg, mes_atual):
     th = cfg["thresholds"]
-    if row["media_12m"] == 0 or row[mes_atual] == 0:
+    if row["media_12m"] == 0 or row.get("fat_projetado", row[mes_atual]) == 0:
         return "SEM HISTÓRICO"
     if row["variacao_pct"] <= -th["alto_queda_pct"] and row["meses_queda"] >= th["alto_meses_min"]:
         return "ALTO"
@@ -371,11 +388,26 @@ def processar(df_cli, df_2025, df_2026, df_pedidos, cfg):
     df["media_12m"]    = df.apply(mediana_sem_zeros, axis=1)
     df["meses_ativos"] = df[janela].apply(lambda r: (r > 0).sum(), axis=1)
     df["mes_atual"]    = df[mes_atual].astype(float)
-    df["variacao_pct"] = (df["mes_atual"] - df["media_12m"]) / df["media_12m"].replace(0, np.nan) * 100
     df["meses_queda"]  = df.apply(lambda r: meses_consecutivos_queda(r, janela, mes_atual), axis=1)
-    df["risco"]        = df.apply(lambda r: calcular_nivel_risco(r, cfg, mes_atual), axis=1)
-    df["impacto_rs"]   = (df["media_12m"] - df["mes_atual"]).clip(lower=0)  # recalculado após projeção
     df["mes_ref"]      = mes_atual
+
+    # Projeção antecipada — necessária para classificar risco corretamente
+    _periodo = mes_str_to_period(mes_atual)
+    _du_total = dias_uteis_mes(_periodo.year, _periodo.month)
+    _du_dec   = dias_uteis_ate(_periodo.year, _periodo.month, hoje)
+    _du_rest  = _du_total - _du_dec
+    if _du_dec > 0:
+        df["fat_projetado"] = (
+            df["mes_atual"] + df["mes_atual"] / _du_dec * _du_rest
+        ).round(0)
+    else:
+        df["fat_projetado"] = df["mes_atual"]
+
+    # Variação e risco baseados na PROJEÇÃO (não no parcial do mês)
+    df["variacao_pct"] = (
+        (df["fat_projetado"] - df["media_12m"]) / df["media_12m"].replace(0, np.nan) * 100
+    )
+    df["risco"] = df.apply(lambda r: calcular_nivel_risco(r, cfg, mes_atual), axis=1)
 
     df_ativos = df[df["mes_atual"] > 0].copy()
 
