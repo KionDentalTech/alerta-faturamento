@@ -1306,15 +1306,28 @@ def _corpo_simples(titulo, subtitulo, mes_ref, fat_total, fat_proj,
 def gerar_email_territorio(nome_resp, codigo, df_terr, mes_ref, cfg, modo_teste,
                             nome_arquivo=""):
     """Corpo simples do e-mail — detalhes completos no anexo HTML."""
-    total_ativos  = len(df_terr)
-    em_risco      = df_terr[df_terr["risco"].isin(["ALTO", "MÉDIO"])]
-    fat_risco     = em_risco["mes_atual"].sum()
+    total_ativos = len(df_terr)
+    em_risco     = df_terr[df_terr["risco"].isin(["ALTO", "MÉDIO"])]
+    fat_total    = df_terr["mes_atual"].sum()          # acumulado do setor em junho
+    n_alto       = (df_terr["risco"] == "ALTO").sum()
+    n_medio      = (df_terr["risco"] == "MÉDIO").sum()
+    n_atenc      = (df_terr["risco"] == "ATENÇÃO").sum()
+
+    # ── Projeção no nível do setor ─────────────────────────────────────────
+    # acumulado do setor ÷ dias úteis decorridos × dias úteis restantes
+    _periodo  = mes_str_to_period(mes_ref)
+    _hoje     = SIM_DATE if SIM_DATE is not None else pd.Timestamp.now()
+    _du_total = dias_uteis_mes(_periodo.year, _periodo.month)
+    _du_dec   = dias_uteis_ate(_periodo.year, _periodo.month, _hoje)
+    _du_rest  = _du_total - _du_dec
+    if _du_dec > 0:
+        fat_proj = float(fat_total + fat_total / _du_dec * _du_rest)
+    else:
+        fat_proj = float(fat_total)
+
+    # ── Faturamento e impacto em risco (baseado na projeção) ──────────────
+    fat_risco     = em_risco["fat_projetado"].sum()
     impacto_total = em_risco["impacto_rs"].sum()
-    fat_total     = df_terr["mes_atual"].sum()
-    fat_proj      = float(df_terr.get("fat_projetado", df_terr["mes_atual"]).sum())
-    n_alto        = (df_terr["risco"] == "ALTO").sum()
-    n_medio       = (df_terr["risco"] == "MÉDIO").sum()
-    n_atenc       = (df_terr["risco"] == "ATENÇÃO").sum()
 
     n_bloqueados = (df_terr.get("status_financeiro", pd.Series([])).astype(str) == "Bloqueado").sum()
 
@@ -1343,11 +1356,22 @@ def gerar_email_territorio(nome_resp, codigo, df_terr, mes_ref, cfg, modo_teste,
 
 def gerar_email_gestor(df_ativos, mes_ref, cfg, modo_teste, nome_arquivo=""):
     """Corpo simples do e-mail consolidado — detalhes no anexo HTML."""
-    em_risco      = df_ativos[df_ativos["risco"].isin(["ALTO", "MÉDIO"])]
-    fat_total     = df_ativos["mes_atual"].sum()
-    fat_proj_tot  = float(df_ativos.get("fat_projetado", df_ativos["mes_atual"]).sum())
-    fat_risco     = em_risco["mes_atual"].sum()
-    impacto_tot   = em_risco["impacto_rs"].sum()
+    em_risco  = df_ativos[df_ativos["risco"].isin(["ALTO", "MÉDIO"])]
+    fat_total = df_ativos["mes_atual"].sum()
+
+    # Projeção consolidada no nível da base
+    _periodo  = mes_str_to_period(mes_ref)
+    _hoje     = SIM_DATE if SIM_DATE is not None else pd.Timestamp.now()
+    _du_total = dias_uteis_mes(_periodo.year, _periodo.month)
+    _du_dec   = dias_uteis_ate(_periodo.year, _periodo.month, _hoje)
+    _du_rest  = _du_total - _du_dec
+    if _du_dec > 0:
+        fat_proj_tot = float(fat_total + fat_total / _du_dec * _du_rest)
+    else:
+        fat_proj_tot = float(fat_total)
+
+    fat_risco   = em_risco["fat_projetado"].sum()
+    impacto_tot = em_risco["impacto_rs"].sum()
     n_bloqueados  = (df_ativos.get("status_financeiro", pd.Series([])).astype(str) == "Bloqueado").sum()
     n_alto_total  = (df_ativos["risco"] == "ALTO").sum()
     n_medio_total = (df_ativos["risco"] == "MÉDIO").sum()
