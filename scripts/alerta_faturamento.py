@@ -374,7 +374,7 @@ def processar(df_cli, df_2025, df_2026, df_pedidos, cfg):
     df["variacao_pct"] = (df["mes_atual"] - df["media_12m"]) / df["media_12m"].replace(0, np.nan) * 100
     df["meses_queda"]  = df.apply(lambda r: meses_consecutivos_queda(r, janela, mes_atual), axis=1)
     df["risco"]        = df.apply(lambda r: calcular_nivel_risco(r, cfg, mes_atual), axis=1)
-    df["impacto_rs"]   = (df["media_12m"] - df["mes_atual"]).clip(lower=0)
+    df["impacto_rs"]   = (df["media_12m"] - df["mes_atual"]).clip(lower=0)  # recalculado após projeção
     df["mes_ref"]      = mes_atual
 
     df_ativos = df[df["mes_atual"] > 0].copy()
@@ -457,6 +457,11 @@ def processar(df_cli, df_2025, df_2026, df_pedidos, cfg):
             df_ativos[col] = 0
         df_ativos["fat_projetado"]    = df_ativos["mes_atual"]
         df_ativos["casos_projetados"] = 0
+
+    # ── Impacto recalculado: Mediana 12M − Proj. Mês ──────────────────────
+    df_ativos["impacto_rs"] = (
+        df_ativos["media_12m"] - df_ativos["fat_projetado"]
+    ).clip(lower=0).round(0)
 
     logging.info(f"  Clientes ativos em {mes_atual}: {len(df_ativos):,}")
     for nivel in ["ALTO", "MÉDIO", "ATENÇÃO", "ESTÁVEL"]:
