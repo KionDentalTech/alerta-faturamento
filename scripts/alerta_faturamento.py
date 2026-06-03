@@ -418,7 +418,11 @@ def processar(df_cli, df_2025, df_2026, df_pedidos, cfg):
     )
     df["risco"] = df.apply(lambda r: calcular_nivel_risco(r, cfg, mes_atual), axis=1)
 
-    df_ativos = df[df["mes_atual"] > 0].copy()
+    # ── Clientes ativos: faturou em pelo menos 1 dos últimos 6 meses ─────────
+    ultimos_6 = [m for m in janela if m in df.columns][-6:]
+    df["ativo_6m"] = df[ultimos_6].apply(lambda r: (r > 0).any(), axis=1)
+    df_ativos = df[df["ativo_6m"]].copy()
+    logging.info(f"  Clientes ativos (últimos 6 meses): {len(df_ativos):,}")
 
     # ── Métricas de pedidos ────────────────────────────────────────────────
     if not df_pedidos.empty:
@@ -924,7 +928,7 @@ def _kpi_row_relatorio(fat_total, fat_proj, total_ativos, n_alto, n_medio,
         <div class="kpi-val kpi-red">{n_alto + n_medio}</div>
         <div class="kpi-sub">
           <span class="bdg bdg-alto">&#128308;&nbsp;{n_alto}</span>
-          <span class="bdg bdg-medio">&#129473;&nbsp;{n_medio}</span>
+          <span class="bdg bdg-medio">&#128993;&nbsp;{n_medio}</span>
           {f'<span class="bdg bdg-atenc">&#128994;&nbsp;{n_atenc}</span>' if n_atenc > 0 else ''}
         </div>
       </div>
@@ -1269,7 +1273,7 @@ def _corpo_simples(titulo, subtitulo, mes_ref, fat_total, fat_proj,
           <div class="kpi-value" style="color:#c0392b">{n_alto + n_medio}</div>
           <div class="kpi-sub">
             <span class="badge badge-alto">&#128308;&nbsp;{n_alto}</span>&nbsp;
-            <span class="badge badge-medio">&#129473;&nbsp;{n_medio}</span>
+            <span class="badge badge-medio">&#128993;&nbsp;{n_medio}</span>
           </div>
         </td>
         <td style="padding:12px 14px;border-right:1px solid #d6eaf8;vertical-align:top">
