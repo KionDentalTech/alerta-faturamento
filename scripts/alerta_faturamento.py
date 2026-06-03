@@ -1,21 +1,21 @@
 """
-Kion Dental — Alerta Diário de Faturamento
-Executa todo dia às 10h (America/Sao_Paulo) via cron no container Docker.
+Kion Dental — Alerta Diario de Faturamento
+Executa todo dia as 10h (America/Sao_Paulo) via cron no container Docker.
 
 Uso:
     python alerta_faturamento.py            → roda normalmente
-    python alerta_faturamento.py --dry-run  → processa mas não envia e-mails (só loga)
+    python alerta_faturamento.py --dry-run  → processa mas nao envia e-mails (so loga)
 
-Variáveis de ambiente (obrigatórias em produção — defina no .env):
-    GRAPH_TENANT_ID     → ID do diretório (tenant) no Entra ID
+Variaveis de ambiente (obrigatorias em producao — defina no .env):
+    GRAPH_TENANT_ID     → ID do diretorio (tenant) no Entra ID
     GRAPH_CLIENT_ID     → ID do aplicativo registrado no Entra ID
     GRAPH_CLIENT_SECRET → segredo do cliente (client secret)
-    KION_BASE           → caminho base do projeto (padrão: /app em Docker, C:\\KionDental local)
+    KION_BASE           → caminho base do projeto (padrao: /app em Docker, C:\\KionDental local)
 
-Métricas calculadas por cliente:
-    Faturamento: MRR real, projeção mês, mediana 12M, variação %, meses consecutivos, impacto R$
-    Casos novos: total mês, projeção mês, mediana 12M, variação %, meses consecutivos
-    Qualidade:   % ajustes, % repetições (alertas quando acima de 20%)
+Metricas calculadas por cliente:
+    Faturamento: MRR real, projecao mes, mediana 12M, variacao %, meses consecutivos, impacto R$
+    Casos novos: total mes, projecao mes, mediana 12M, variacao %, meses consecutivos
+    Qualidade:   % ajustes, % repeticoes (alertas quando acima de 20%)
     Financeiro:  status (Ativo/Bloqueado/Inativo) e motivo do bloqueio
 """
 
@@ -36,12 +36,12 @@ import yaml
 # ─────────────────────────────────────────────
 
 def brl(v) -> str:
-    """Formata número no padrão brasileiro: 1.234.567 (ponto como separador de milhar)."""
+    """Formata numero no padrao brasileiro: 1.234.567 (ponto como separador de milhar)."""
     return f"{float(v or 0):,.0f}".replace(",", ".")
 
 
 # ─────────────────────────────────────────────
-#  CONFIGURAÇÃO
+#  CONFIGURACAO
 # ─────────────────────────────────────────────
 
 BASE_DIR    = os.environ.get("KION_BASE", r"C:\KionDental")
@@ -49,7 +49,7 @@ CONFIG_PATH = os.path.join(BASE_DIR, "config", "config.yaml")
 DRY_RUN     = "--dry-run" in sys.argv
 PREVIEW     = "--preview" in sys.argv
 
-# --simdate=YYYY-MM-DD  → simula execução em outra data (para testes/previews)
+# --simdate=YYYY-MM-DD  → simula execucao em outra data (para testes/previews)
 SIM_DATE: pd.Timestamp | None = None
 for _arg in sys.argv:
     if _arg.startswith("--simdate="):
@@ -85,7 +85,7 @@ def configurar_log(log_dir):
 
 
 # ─────────────────────────────────────────────
-#  CONSTANTES DE PERÍODO
+#  CONSTANTES DE PERIODO
 # ─────────────────────────────────────────────
 
 MESES_MAP = {
@@ -107,7 +107,7 @@ MESES_NOMES = {v: k for k, v in MESES_MAP.items()}
 
 
 def calcular_janela_12m(mes_atual_str: str) -> list:
-    """Janela de 12 meses terminando em mes_atual_str (rolling, não hardcoded)."""
+    """Janela de 12 meses terminando em mes_atual_str (rolling, nao hardcoded)."""
     periodo = mes_str_to_period(mes_atual_str)
     return [f"{MESES_NOMES[(periodo - i).month]} {(periodo - i).year}"
             for i in range(11, -1, -1)]
@@ -120,14 +120,14 @@ def mes_str_to_period(mes_str: str) -> pd.Period:
 
 
 def dias_uteis_mes(ano: int, mes: int) -> int:
-    """Total de dias úteis (seg–sex) no mês."""
+    """Total de dias uteis (seg–sex) no mes."""
     inicio = pd.Timestamp(ano, mes, 1)
     fim    = inicio + pd.offsets.MonthEnd(0)
     return len(pd.bdate_range(inicio, fim))
 
 
 def dias_uteis_ate(ano: int, mes: int, ate: pd.Timestamp) -> int:
-    """Dias úteis decorridos do início do mês até `ate` (inclusive)."""
+    """Dias uteis decorridos do inicio do mes ate `ate` (inclusive)."""
     inicio  = pd.Timestamp(ano, mes, 1)
     fim_mes = inicio + pd.offsets.MonthEnd(0)
     ate_clamped = min(ate, fim_mes)
@@ -158,7 +158,7 @@ def ler_pedidos(pasta: str) -> pd.DataFrame:
     """
     arquivos = sorted(glob.glob(os.path.join(pasta, "*.xlsx")))
     if not arquivos:
-        logging.warning("  Pasta de pedidos sem arquivos xlsx — métricas de casos desativadas.")
+        logging.warning("  Pasta de pedidos sem arquivos xlsx — metricas de casos desativadas.")
         return pd.DataFrame()
 
     logging.info(f"Lendo pedidos ({len(arquivos)} arquivos)...")
@@ -176,7 +176,7 @@ def ler_pedidos(pasta: str) -> pd.DataFrame:
 
     df_all = pd.concat(dfs, ignore_index=True)
 
-    # Coluna Repetição|Ajuste
+    # Coluna Repeticao|Ajuste
     col_ra = next((c for c in df_all.columns if "Repeti" in c), None)
     df_all["rep_ajuste"] = df_all[col_ra].fillna("").astype(str).str.strip().str.upper() if col_ra else ""
 
@@ -190,10 +190,10 @@ def ler_pedidos(pasta: str) -> pd.DataFrame:
     df_all["Nº pedido"] = df_all["Nº pedido"].astype(str).str.strip()
     df_all = df_all[~df_all["Nº pedido"].isin(["", "nan", "NaN"])].copy()
 
-    # Valor total numérico
+    # Valor total numerico
     df_all["valor_total"] = pd.to_numeric(df_all.get("Valor total"), errors="coerce").fillna(0)
 
-    # Status produção
+    # Status producao
     df_all["status_pedido"] = df_all.get("Status", pd.Series("")).astype(str).str.strip()
 
     # Cliente normalizado
@@ -202,7 +202,7 @@ def ler_pedidos(pasta: str) -> pd.DataFrame:
     # Excluir pedidos cancelados para contagem de casos
     df_all = df_all[df_all["status_pedido"] != "Cancelado"].copy()
 
-    # Deduplica por Nº pedido (múltiplas linhas de serviço por pedido)
+    # Deduplica por Nº pedido (multiplas linhas de servico por pedido)
     df_all = df_all.drop_duplicates(subset=["Nº pedido"], keep="first")
 
     # Tipo do pedido
@@ -210,20 +210,20 @@ def ler_pedidos(pasta: str) -> pd.DataFrame:
     df_all.loc[df_all["rep_ajuste"] == "R", "tipo"] = "repeticao"
     df_all.loc[df_all["rep_ajuste"] == "A", "tipo"] = "ajuste"
 
-    logging.info(f"  Total pedidos consolidados: {len(df_all):,} (únicos, não cancelados)")
+    logging.info(f"  Total pedidos consolidados: {len(df_all):,} (unicos, nao cancelados)")
     return df_all
 
 
 # ─────────────────────────────────────────────
-#  MÉTRICAS DE PEDIDOS
+#  METRICAS DE PEDIDOS
 # ─────────────────────────────────────────────
 
 def calcular_metricas_pedidos(df_pedidos: pd.DataFrame, janela: list) -> pd.DataFrame:
     """
     Retorna DataFrame indexado por Cliente com colunas:
-        casos_{mes}   → casos novos no mês
-        rep_pct_{mes} → % repetições no mês
-        adj_pct_{mes} → % ajustes no mês
+        casos_{mes}   → casos novos no mes
+        rep_pct_{mes} → % repeticoes no mes
+        adj_pct_{mes} → % ajustes no mes
     """
     if df_pedidos.empty:
         return pd.DataFrame()
@@ -262,11 +262,11 @@ def calcular_metricas_pedidos(df_pedidos: pd.DataFrame, janela: list) -> pd.Data
 
 def calcular_projecao(df_pedidos: pd.DataFrame, mes_str: str, hoje: pd.Timestamp):
     """
-    Projeta faturamento e casos novos para o mês em andamento.
+    Projeta faturamento e casos novos para o mes em andamento.
 
-    Fórmula:
-        taxa_diaria  = acumulado ÷ dias_úteis_decorridos
-        projeção     = acumulado + (taxa_diaria × dias_úteis_restantes)
+    Formula:
+        taxa_diaria  = acumulado ÷ dias_uteis_decorridos
+        projecao     = acumulado + (taxa_diaria × dias_uteis_restantes)
 
     Retorna (serie_fat_projetado, serie_casos_projetados) indexadas por Cliente.
     """
@@ -289,7 +289,7 @@ def calcular_projecao(df_pedidos: pd.DataFrame, mes_str: str, hoje: pd.Timestamp
     dm_fat   = dm[dm["status_pedido"] == "Finalizado"]
     fat_acum = dm_fat.groupby("Cliente")["valor_total"].sum()
 
-    taxa_fat = fat_acum / du_decorridos                        # R$/dia útil
+    taxa_fat = fat_acum / du_decorridos                        # R$/dia util
     fat_proj = (fat_acum + taxa_fat * du_restantes).round(0)   # acumulado + restante estimado
 
     # ── Casos novos projetados ─────────────────────────────────────────────
@@ -307,7 +307,7 @@ def calcular_projecao(df_pedidos: pd.DataFrame, mes_str: str, hoje: pd.Timestamp
 # ─────────────────────────────────────────────
 
 def detectar_mes_atual(df_2026):
-    """Retorna o mês mais recente com pelo menos 100 clientes faturando."""
+    """Retorna o mes mais recente com pelo menos 100 clientes faturando."""
     for mes in reversed(MESES_2026):
         if mes in df_2026.columns and (pd.to_numeric(df_2026[mes], errors="coerce") > 0).sum() >= 100:
             return mes
@@ -317,10 +317,10 @@ def detectar_mes_atual(df_2026):
 def meses_consecutivos_queda(row, cols_janela: list, col_atual: str) -> int:
     """
     Conta meses FECHADOS consecutivos onde o faturamento/casos ficaram
-    abaixo da mediana histórica (não compara com o mês atual parcial).
+    abaixo da mediana historica (nao compara com o mes atual parcial).
 
-    - Para faturamento: compara cada mês fechado vs media_12m
-    - Para casos:       compara cada mês fechado vs casos_mediana_12m
+    - Para faturamento: compara cada mes fechado vs media_12m
+    - Para casos:       compara cada mes fechado vs casos_mediana_12m
     """
     if col_atual not in cols_janela:
         return 0
@@ -351,14 +351,14 @@ def meses_consecutivos_queda(row, cols_janela: list, col_atual: str) -> int:
 def calcular_nivel_risco(row, cfg, mes_atual):
     th = cfg["thresholds"]
     if row["media_12m"] == 0 or row.get("fat_projetado", row[mes_atual]) == 0:
-        return "SEM HISTÓRICO"
+        return "SEM HISTORICO"
     if row["variacao_pct"] <= -th["alto_queda_pct"] and row["meses_queda"] >= th["alto_meses_min"]:
         return "ALTO"
     if row["variacao_pct"] <= -th["medio_queda_pct"]:
-        return "MÉDIO"
+        return "MEDIO"
     if row["variacao_pct"] < 0:
-        return "ATENÇÃO"
-    return "ESTÁVEL"
+        return "ATENCAO"
+    return "ESTAVEL"
 
 
 def processar(df_cli, df_2025, df_2026, df_pedidos, cfg):
@@ -384,7 +384,7 @@ def processar(df_cli, df_2025, df_2026, df_pedidos, cfg):
     df = pd.merge(df_fat, df_cli_limpo, on="Cliente", how="left")
 
     mes_atual = detectar_mes_atual(df_2026)
-    logging.info(f"  Mês de referência: {mes_atual}")
+    logging.info(f"  Mes de referencia: {mes_atual}")
 
     # Janela rolling de 12 meses a partir do mes_atual
     janela = [m for m in calcular_janela_12m(mes_atual) if m in df.columns]
@@ -400,7 +400,7 @@ def processar(df_cli, df_2025, df_2026, df_pedidos, cfg):
     df["meses_queda"]  = df.apply(lambda r: meses_consecutivos_queda(r, janela, mes_atual), axis=1)
     df["mes_ref"]      = mes_atual
 
-    # Projeção antecipada — necessária para classificar risco corretamente
+    # Projecao antecipada — necessaria para classificar risco corretamente
     _periodo = mes_str_to_period(mes_atual)
     _du_total = dias_uteis_mes(_periodo.year, _periodo.month)
     _du_dec   = dias_uteis_ate(_periodo.year, _periodo.month, hoje)
@@ -412,33 +412,33 @@ def processar(df_cli, df_2025, df_2026, df_pedidos, cfg):
     else:
         df["fat_projetado"] = df["mes_atual"]
 
-    # Variação e risco baseados na PROJEÇÃO (não no parcial do mês)
+    # Variacao e risco baseados na PROJECAO (nao no parcial do mes)
     df["variacao_pct"] = (
         (df["fat_projetado"] - df["media_12m"]) / df["media_12m"].replace(0, np.nan) * 100
     )
     df["risco"] = df.apply(lambda r: calcular_nivel_risco(r, cfg, mes_atual), axis=1)
 
-    # ── Clientes ativos: faturou em pelo menos 1 dos últimos 6 meses ─────────
+    # ── Clientes ativos: faturou em pelo menos 1 dos ultimos 6 meses ─────────
     ultimos_6 = [m for m in janela if m in df.columns][-6:]
     df["ativo_6m"] = df[ultimos_6].apply(lambda r: (r > 0).any(), axis=1)
     df_ativos = df[df["ativo_6m"]].copy()
-    logging.info(f"  Clientes ativos (últimos 6 meses): {len(df_ativos):,}")
+    logging.info(f"  Clientes ativos (ultimos 6 meses): {len(df_ativos):,}")
 
-    # ── Métricas de pedidos ────────────────────────────────────────────────
+    # ── Metricas de pedidos ────────────────────────────────────────────────
     if not df_pedidos.empty:
-        logging.info("  Calculando métricas de pedidos (casos, ajustes, repetições)...")
+        logging.info("  Calculando metricas de pedidos (casos, ajustes, repeticoes)...")
 
         df_metricas = calcular_metricas_pedidos(df_pedidos, janela)
 
         if not df_metricas.empty:
             df_ativos = pd.merge(df_ativos, df_metricas, on="Cliente", how="left")
 
-            # Colunas de casos novos por mês
+            # Colunas de casos novos por mes
             casos_cols = [f"casos_{m}" for m in janela if f"casos_{m}" in df_ativos.columns]
             for c in casos_cols:
                 df_ativos[c] = df_ativos[c].fillna(0).astype(int)
 
-            # Casos novos mês atual
+            # Casos novos mes atual
             col_casos_atual = f"casos_{mes_atual}"
             df_ativos["casos_novos_atual"] = (
                 df_ativos[col_casos_atual].fillna(0).astype(int)
@@ -452,7 +452,7 @@ def processar(df_cli, df_2025, df_2026, df_pedidos, cfg):
 
             df_ativos["casos_mediana_12m"] = df_ativos.apply(mediana_casos, axis=1)
 
-            # Variação e meses consecutivos de queda em casos
+            # Variacao e meses consecutivos de queda em casos
             df_ativos["casos_var_pct"] = (
                 (df_ativos["casos_novos_atual"] - df_ativos["casos_mediana_12m"])
                 / df_ativos["casos_mediana_12m"].replace(0, np.nan) * 100
@@ -461,7 +461,7 @@ def processar(df_cli, df_2025, df_2026, df_pedidos, cfg):
                 lambda r: meses_consecutivos_queda(r, casos_cols, col_casos_atual), axis=1
             )
 
-            # % ajustes e repetições do mês atual
+            # % ajustes e repeticoes do mes atual
             col_rep = f"rep_pct_{mes_atual}"
             col_adj = f"adj_pct_{mes_atual}"
             df_ativos["rep_pct_atual"] = (
@@ -475,9 +475,9 @@ def processar(df_cli, df_2025, df_2026, df_pedidos, cfg):
                         "casos_meses_queda", "rep_pct_atual", "adj_pct_atual"]:
                 df_ativos[col] = 0
 
-        # ── Projeção do mês atual ──────────────────────────────────────────
-        # Usa MRR atual do ERP como acumulado (mais preciso que pedidos não finalizados)
-        # Fórmula: acumulado + (acumulado ÷ dias_decorridos × dias_restantes)
+        # ── Projecao do mes atual ──────────────────────────────────────────
+        # Usa MRR atual do ERP como acumulado (mais preciso que pedidos nao finalizados)
+        # Formula: acumulado + (acumulado ÷ dias_decorridos × dias_restantes)
         periodo_atual = mes_str_to_period(mes_atual)
         du_total  = dias_uteis_mes(periodo_atual.year, periodo_atual.month)
         du_dec    = dias_uteis_ate(periodo_atual.year, periodo_atual.month, hoje)
@@ -503,13 +503,13 @@ def processar(df_cli, df_2025, df_2026, df_pedidos, cfg):
         df_ativos["fat_projetado"]    = df_ativos["mes_atual"]
         df_ativos["casos_projetados"] = 0
 
-    # ── Impacto recalculado: Mediana 12M − Proj. Mês ──────────────────────
+    # ── Impacto recalculado: Mediana 12M − Proj. Mes ──────────────────────
     df_ativos["impacto_rs"] = (
         df_ativos["media_12m"] - df_ativos["fat_projetado"]
     ).clip(lower=0).round(0)
 
     logging.info(f"  Clientes ativos em {mes_atual}: {len(df_ativos):,}")
-    for nivel in ["ALTO", "MÉDIO", "ATENÇÃO", "ESTÁVEL"]:
+    for nivel in ["ALTO", "MEDIO", "ATENCAO", "ESTAVEL"]:
         logging.info(f"    {nivel}: {(df_ativos['risco'] == nivel).sum()}")
 
     return df_ativos, mes_atual
@@ -519,7 +519,7 @@ def processar(df_cli, df_2025, df_2026, df_pedidos, cfg):
 #  TEMPLATES HTML
 # ─────────────────────────────────────────────
 
-EMOJI = {"ALTO": "🔴", "MÉDIO": "🟡", "ATENÇÃO": "🟢", "ESTÁVEL": "✅"}
+EMOJI = {"ALTO": "🔴", "MEDIO": "🟡", "ATENCAO": "🟢", "ESTAVEL": "✅"}
 
 
 def _status_badge(r) -> str:
@@ -558,7 +558,7 @@ def _bloco_risco(df_terr, nivel, label_acao, show_vendas=False, cfg=None) -> str
     n           = len(grupo)
     rows        = ""
 
-    COR = {"ALTO": "#c0392b", "MÉDIO": "#e67e22", "ATENÇÃO": "#27ae60"}
+    COR = {"ALTO": "#c0392b", "MEDIO": "#e67e22", "ATENCAO": "#27ae60"}
     cor_nivel = COR.get(nivel, "#00B1D2")
 
     for _, r in grupo.iterrows():
@@ -573,11 +573,11 @@ def _bloco_risco(df_terr, nivel, label_acao, show_vendas=False, cfg=None) -> str
         adj_pct   = float(r.get("adj_pct_atual") or 0)
         rep_pct   = float(r.get("rep_pct_atual") or 0)
 
-        # Variação faturamento
+        # Variacao faturamento
         vf = r["variacao_pct"]
         cor_vf  = "#c0392b" if vf < 0 else "#27ae60"
 
-        # Variação casos
+        # Variacao casos
         if casos_var is not None and not pd.isna(casos_var):
             cor_vc = "#c0392b" if casos_var < -10 else "#27ae60" if casos_var > 5 else "#888"
             vc_str = f"<span style='color:{cor_vc};font-weight:700'>{casos_var:+.0f}%</span>"
@@ -597,14 +597,14 @@ def _bloco_risco(df_terr, nivel, label_acao, show_vendas=False, cfg=None) -> str
           <td>{casos_prj}</td>
           <td style="color:#aaa">{casos_med:.0f}</td>
           <td>{vc_str}</td>
-          <td style="color:#aaa">{casos_mq}m&nbsp;&#8595;</td>
-          <td><span style="color:{adj_cor}">Adj&nbsp;{adj_pct:.0f}%</span>&nbsp;
-              <span style="color:{rep_cor}">Rep&nbsp;{rep_pct:.0f}%</span></td>
+          <td style="color:#aaa">{casos_mq}m &#8595;</td>
+          <td><span style="color:{adj_cor}">Adj {adj_pct:.0f}%</span> 
+              <span style="color:{rep_cor}">Rep {rep_pct:.0f}%</span></td>
         </tr>"""
         else:
             sub_row = ""
 
-        # Coluna de responsável (só no e-mail do gestor)
+        # Coluna de responsavel (so no e-mail do gestor)
         resp_cell = ""
         if show_vendas and cfg:
             terr = str(r.get("vendas") or "—")
@@ -621,22 +621,22 @@ def _bloco_risco(df_terr, nivel, label_acao, show_vendas=False, cfg=None) -> str
             {_narrativa(r)}
           </td>
           {resp_cell}
-          <td style="font-weight:700">R$&nbsp;{brl(r['mes_atual'])}</td>
-          <td style="color:#555">R$&nbsp;{brl(fat_proj)}</td>
-          <td style="color:#888">R$&nbsp;{brl(r['media_12m'])}</td>
+          <td style="font-weight:700">R$ {brl(r['mes_atual'])}</td>
+          <td style="color:#555">R$ {brl(fat_proj)}</td>
+          <td style="color:#888">R$ {brl(r['media_12m'])}</td>
           <td style="font-weight:700;color:{cor_vf}">{vf:+.0f}%</td>
           <td style="color:#555">{int(r['meses_queda'])}m</td>
-          <td style="font-weight:700;color:#c0392b">-R$&nbsp;{brl(r['impacto_rs'])}</td>
+          <td style="font-weight:700;color:#c0392b">-R$ {brl(r['impacto_rs'])}</td>
         </tr>{sub_row}"""
 
-    col_resp_th = "<th>Respons&aacute;vel</th>" if show_vendas else ""
-    col_resp_op = "<th style='color:#00B1D2;font-size:10px;font-weight:600'>&nbsp;</th>" if show_vendas else ""
+    col_resp_th = "<th>Responsavel</th>" if show_vendas else ""
+    col_resp_op = "<th style='color:#00B1D2;font-size:10px;font-weight:600'> </th>" if show_vendas else ""
     cliente_width = "28%" if show_vendas else "34%"
 
     return f"""
     <p class="section-title" style="border-left:3px solid {cor_nivel};padding-left:8px">
-      {emoji}&nbsp;{nivel} &mdash; {label_acao}
-      <span style="font-weight:400;color:#9AA0A6;font-size:10px;margin-left:6px">{n}&nbsp;cliente(s)</span>
+      {emoji} {nivel} - {label_acao}
+      <span style="font-weight:400;color:#9AA0A6;font-size:10px;margin-left:6px">{n} cliente(s)</span>
     </p>
     <table>
       <thead>
@@ -644,20 +644,20 @@ def _bloco_risco(df_terr, nivel, label_acao, show_vendas=False, cfg=None) -> str
           <th style="width:{cliente_width}">Cliente</th>
           {col_resp_th}
           <th>MRR Atual</th>
-          <th>Proj.&nbsp;M&ecirc;s</th>
-          <th>Mediana&nbsp;12M</th>
-          <th>Varia&ccedil;&atilde;o</th>
-          <th>Meses&nbsp;&#8595;</th>
-          <th>Impacto/m&ecirc;s</th>
+          <th>Proj. Mes</th>
+          <th>Mediana 12M</th>
+          <th>Variacao</th>
+          <th>Meses &#8595;</th>
+          <th>Impacto/mes</th>
         </tr>
         {f'''<tr style="background:#e8f8fd">
-          <th style="color:#00B1D2;font-size:10px;font-weight:600">Tabela&nbsp;de&nbsp;Pre&ccedil;o</th>
+          <th style="color:#00B1D2;font-size:10px;font-weight:600">Tabela de Preco</th>
           {col_resp_op}
-          <th style="color:#00B1D2;font-size:10px;font-weight:600">Casos&nbsp;Novos</th>
-          <th style="color:#00B1D2;font-size:10px;font-weight:600">Proj.&nbsp;Casos</th>
-          <th style="color:#00B1D2;font-size:10px;font-weight:600">Med.&nbsp;Casos&nbsp;12M</th>
-          <th style="color:#00B1D2;font-size:10px;font-weight:600">Var.&nbsp;Casos</th>
-          <th style="color:#00B1D2;font-size:10px;font-weight:600">Meses&nbsp;&#8595;</th>
+          <th style="color:#00B1D2;font-size:10px;font-weight:600">Casos Novos</th>
+          <th style="color:#00B1D2;font-size:10px;font-weight:600">Proj. Casos</th>
+          <th style="color:#00B1D2;font-size:10px;font-weight:600">Med. Casos 12M</th>
+          <th style="color:#00B1D2;font-size:10px;font-weight:600">Var. Casos</th>
+          <th style="color:#00B1D2;font-size:10px;font-weight:600">Meses &#8595;</th>
           <th style="color:#00B1D2;font-size:10px;font-weight:600">Qualidade</th>
         </tr>''' if tem_pedidos else ''}
       </thead>
@@ -665,7 +665,7 @@ def _bloco_risco(df_terr, nivel, label_acao, show_vendas=False, cfg=None) -> str
     </table>"""
 
 
-# ── CSS moderno para o relatório HTML standalone (anexo) ─────────────────────
+# ── CSS moderno para o relatorio HTML standalone (anexo) ─────────────────────
 CSS_RELATORIO = """
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
@@ -703,7 +703,7 @@ CSS_RELATORIO = """
   .kpi-sub{font-size:10px;color:var(--suave);margin-top:3px}
   .kpi-red{color:var(--vermelho)}
 
-  /* ── Seções de risco ── */
+  /* ── Secoes de risco ── */
   .section{margin-bottom:28px}
   .section-hd{display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:6px;margin-bottom:8px}
   .section-hd.alto{background:#fff0f0;border-left:4px solid var(--vermelho)}
@@ -739,12 +739,12 @@ CSS_RELATORIO = """
   .legenda{margin-top:24px;padding-top:14px;border-top:1px solid var(--borda);font-size:10px;color:#aaa;line-height:1.9}
   .legenda strong{color:#bbb}
 
-  /* ── Rodapé ── */
+  /* ── Rodape ── */
   .rpt-footer{background:var(--cinza-dark);padding:14px 28px;display:flex;align-items:center;justify-content:space-between;margin-top:0}
   .rpt-footer p{font-size:11px;color:#8D8E8F;line-height:1.8}
   .rpt-footer strong{color:var(--azul-vivo)}
 
-  /* ── Botão imprimir ── */
+  /* ── Botao imprimir ── */
   .btn-print{position:fixed;bottom:20px;right:20px;background:var(--azul);color:#fff;border:none;padding:10px 18px;border-radius:20px;font-size:12px;font-weight:600;cursor:pointer;box-shadow:0 3px 10px rgba(0,177,210,.35);z-index:99}
   .btn-print:hover{background:#009ab8}
 
@@ -846,12 +846,12 @@ def _header(tag_titulo):
         '<table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse">'
         '<tr><td height="4" bgcolor="#00B1D2" style="height:4px;font-size:0;line-height:0;'
         "background:#00B1D2;background:linear-gradient(90deg,#00F5FF 0%,#00B1D2 50%,#FAEB1E 100%)\">"
-        "&nbsp;</td></tr></table>"
+        " </td></tr></table>"
     )
 
 
 def _legenda() -> str:
-    """Bloco de legenda sutil antes do rodapé."""
+    """Bloco de legenda sutil antes do rodape."""
     return (
         '<table width="100%" cellpadding="0" cellspacing="0" '
         'style="border-collapse:collapse;margin-top:24px">'
@@ -861,21 +861,21 @@ def _legenda() -> str:
         'Legenda</p>'
         '<p style="margin:0;font-size:10px;color:#bdc3c7;line-height:1.8;'
         'font-family:Arial,sans-serif">'
-        '<strong style="color:#9AA0A6">MRR Atual</strong> Faturamento real do m&ecirc;s (ERP) &nbsp;&bull;&nbsp; '
-        '<strong style="color:#9AA0A6">Proj. M&ecirc;s</strong> Estimativa de fechamento = acumulado &divide; dias &uacute;teis decorridos &times; dias &uacute;teis totais &nbsp;&bull;&nbsp; '
-        '<strong style="color:#9AA0A6">Mediana 12M</strong> Baseline hist&oacute;rico (mediana dos &uacute;ltimos 12 meses com faturamento &gt; 0) &nbsp;&bull;&nbsp; '
-        '<strong style="color:#9AA0A6">Varia&ccedil;&atilde;o</strong> (MRR Atual &minus; Mediana) &divide; Mediana &nbsp;&bull;&nbsp; '
-        '<strong style="color:#9AA0A6">Meses&nbsp;&#8595;</strong> Meses consecutivos de queda &nbsp;&bull;&nbsp; '
-        '<strong style="color:#9AA0A6">Impacto</strong> Mediana &minus; MRR Atual'
+        '<strong style="color:#9AA0A6">MRR Atual</strong> Faturamento real do mes (ERP)  |  '
+        '<strong style="color:#9AA0A6">Proj. Mes</strong> Estimativa de fechamento = acumulado / dias uteis decorridos x dias uteis totais  |  '
+        '<strong style="color:#9AA0A6">Mediana 12M</strong> Baseline historico (mediana dos ultimos 12 meses com faturamento > 0)  |  '
+        '<strong style="color:#9AA0A6">Variacao</strong> (MRR Atual - Mediana) / Mediana  |  '
+        '<strong style="color:#9AA0A6">Meses &#8595;</strong> Meses consecutivos de queda  |  '
+        '<strong style="color:#9AA0A6">Impacto</strong> Mediana - MRR Atual'
         '</p>'
         '<p style="margin:6px 0 0;font-size:10px;color:#bdc3c7;line-height:1.8;'
         'font-family:Arial,sans-serif">'
-        '<strong style="color:#9AA0A6">Casos Novos</strong> Pedidos &uacute;nicos sem Repeti&ccedil;&atilde;o ou Ajuste no m&ecirc;s &nbsp;&bull;&nbsp; '
-        '<strong style="color:#9AA0A6">Proj. Casos</strong> Mesma f&oacute;rmula de proje&ccedil;&atilde;o aplicada a casos &nbsp;&bull;&nbsp; '
-        '<strong style="color:#9AA0A6">Med. Casos 12M</strong> Mediana hist&oacute;rica de casos novos &nbsp;&bull;&nbsp; '
-        '<strong style="color:#9AA0A6">Adj %</strong> Pedidos de ajuste &divide; total &nbsp;&bull;&nbsp; '
-        '<strong style="color:#9AA0A6">Rep %</strong> Pedidos de repeti&ccedil;&atilde;o &divide; total &nbsp;&bull;&nbsp; '
-        '<span style="color:#c0392b">Vermelho</span> quando Adj ou Rep &gt; 20%'
+        '<strong style="color:#9AA0A6">Casos Novos</strong> Pedidos unicos sem Repeticao ou Ajuste no mes  |  '
+        '<strong style="color:#9AA0A6">Proj. Casos</strong> Mesma formula de projecao aplicada a casos  |  '
+        '<strong style="color:#9AA0A6">Med. Casos 12M</strong> Mediana historica de casos novos  |  '
+        '<strong style="color:#9AA0A6">Adj %</strong> Pedidos de ajuste / total  |  '
+        '<strong style="color:#9AA0A6">Rep %</strong> Pedidos de repeticao / total  |  '
+        '<span style="color:#c0392b">Vermelho</span> quando Adj ou Rep > 20%'
         '</p>'
         '</td></tr></table>'
     )
@@ -889,35 +889,35 @@ def _footer(mes_ref):
         '<td colspan="2" bgcolor="#282828" style="padding:0 24px;background:#282828;font-size:0;line-height:0">'
         '<table width="100%" cellpadding="0" cellspacing="0" border="0" '
         'style="border-collapse:collapse;border-top:1px solid #3a3a3a">'
-        '<tr><td style="height:1px;font-size:0;line-height:0">&nbsp;</td></tr>'
+        '<tr><td style="height:1px;font-size:0;line-height:0"> </td></tr>'
         "</table></td></tr><tr>"
         '<td bgcolor="#282828" style="padding:12px 24px 14px;vertical-align:middle;background:#282828">'
         '<p style="margin:0;padding:0;font-size:11px;color:#8D8E8F;line-height:1.9;'
         'font-family:Arial,Helvetica,sans-serif">'
         '<strong style="color:#00F5FF">Analytics Kion Dental</strong><br>'
         "analytics@kiondental.tech<br>"
-        "An&aacute;lise desenvolvida pelo "
-        '<strong style="color:#00F5FF">Time de Tecnologia e Inova&ccedil;&atilde;o da Kion</strong>'
+        "Analise desenvolvida pelo "
+        '<strong style="color:#00F5FF">Time de Tecnologia e Inovacao da Kion</strong>'
         "</p></td>"
         '<td align="right" bgcolor="#282828" '
         'style="padding:12px 24px 14px;text-align:right;vertical-align:middle;background:#282828">'
         f"{KION_ARC}"
         f'<p style="margin:4px 0 0;padding:0;font-size:10px;color:#5A5A5A;line-height:1.8;'
         f'font-family:Arial,Helvetica,sans-serif">'
-        f"Gerado automaticamente &bull; {mes_ref.upper()}"
+        f"Gerado automaticamente | {mes_ref.upper()}"
         f"</p></td></tr></table>"
     )
 
 
 def _kpi_row_relatorio(fat_total, fat_proj, total_ativos, n_alto, n_medio,
                        n_atenc, fat_risco, impacto_total, total_casos, casos_proj, n_bloqueados, mes_ref):
-    """KPI cards para o relatório HTML standalone (CSS moderno)."""
+    """KPI cards para o relatorio HTML standalone (CSS moderno)."""
     return f"""
     <div class="kpi-row">
       <div class="kpi-card destaque">
         <div class="kpi-lbl">Faturamento {mes_ref}</div>
-        <div class="kpi-val">R$&nbsp;{brl(fat_total)}</div>
-        <div class="kpi-sub">Proj:&nbsp;R$&nbsp;{brl(fat_proj)}</div>
+        <div class="kpi-val">R$ {brl(fat_total)}</div>
+        <div class="kpi-sub">Proj: R$ {brl(fat_proj)}</div>
       </div>
       <div class="kpi-card">
         <div class="kpi-lbl">Clientes Ativos</div>
@@ -927,44 +927,44 @@ def _kpi_row_relatorio(fat_total, fat_proj, total_ativos, n_alto, n_medio,
         <div class="kpi-lbl">Em Risco</div>
         <div class="kpi-val kpi-red">{n_alto + n_medio}</div>
         <div class="kpi-sub">
-          <span class="bdg bdg-alto">&#128308;&nbsp;{n_alto}</span>
-          <span class="bdg bdg-medio">&#128993;&nbsp;{n_medio}</span>
-          {f'<span class="bdg bdg-atenc">&#128994;&nbsp;{n_atenc}</span>' if n_atenc > 0 else ''}
+          <span class="bdg bdg-alto">&#128308; {n_alto}</span>
+          <span class="bdg bdg-medio">&#128993; {n_medio}</span>
+          {f'<span class="bdg bdg-atenc">&#128994; {n_atenc}</span>' if n_atenc > 0 else ''}
         </div>
       </div>
       <div class="kpi-card risco">
         <div class="kpi-lbl">Fat. em Risco</div>
-        <div class="kpi-val kpi-red">R$&nbsp;{brl(fat_risco)}</div>
-        <div class="kpi-sub">{fat_risco/fat_total*100:.1f}%&nbsp;da&nbsp;carteira</div>
+        <div class="kpi-val kpi-red">R$ {brl(fat_risco)}</div>
+        <div class="kpi-sub">{fat_risco/fat_total*100:.1f}% da carteira</div>
       </div>
       <div class="kpi-card risco">
         <div class="kpi-lbl">Impacto vs. Mediana</div>
-        <div class="kpi-val kpi-red">-R$&nbsp;{brl(impacto_total)}</div>
-        <div class="kpi-sub">por&nbsp;m&ecirc;s</div>
+        <div class="kpi-val kpi-red">-R$ {brl(impacto_total)}</div>
+        <div class="kpi-sub">por mes</div>
       </div>
       {f'''<div class="kpi-card destaque">
         <div class="kpi-lbl">Casos Novos</div>
         <div class="kpi-val">{total_casos}</div>
-        <div class="kpi-sub">Proj:&nbsp;{casos_proj}</div>
+        <div class="kpi-sub">Proj: {casos_proj}</div>
       </div>''' if total_casos > 0 else ''}
       {f'''<div class="kpi-card bloqueado">
         <div class="kpi-lbl" style="color:var(--vermelho)">Bloqueados</div>
-        <div class="kpi-val kpi-red">&#128683;&nbsp;{n_bloqueados}</div>
+        <div class="kpi-val kpi-red">&#128683; {n_bloqueados}</div>
       </div>''' if n_bloqueados > 0 else ''}
     </div>"""
 
 
 def _bloco_risco_relatorio(df_terr, nivel, label_acao, show_vendas=False, cfg=None):
-    """Versão do bloco de risco para o relatório HTML standalone (CSS moderno)."""
+    """Versao do bloco de risco para o relatorio HTML standalone (CSS moderno)."""
     grupo = df_terr[df_terr["risco"] == nivel].sort_values("impacto_rs", ascending=False)
     if grupo.empty:
         return ""
 
     n           = len(grupo)
     tem_pedidos = "casos_novos_atual" in df_terr.columns
-    COR_HD      = {"ALTO": "alto", "MÉDIO": "medio", "ATENÇÃO": "atenc"}
+    COR_HD      = {"ALTO": "alto", "MEDIO": "medio", "ATENCAO": "atenc"}
     cls_hd      = COR_HD.get(nivel, "atenc")
-    EMOJI_MAP   = {"ALTO": "🔴", "MÉDIO": "🟡", "ATENÇÃO": "🟢"}
+    EMOJI_MAP   = {"ALTO": "🔴", "MEDIO": "🟡", "ATENCAO": "🟢"}
     emoji       = EMOJI_MAP.get(nivel, "")
     rows        = ""
 
@@ -1010,8 +1010,8 @@ def _bloco_risco_relatorio(df_terr, nivel, label_acao, show_vendas=False, cfg=No
               <td style="color:var(--suave)">{casos_prj}</td>
               <td style="color:var(--suave)">{casos_med:.0f}</td>
               <td>{vc_str}</td>
-              <td style="color:var(--suave)">{casos_mq}m&nbsp;&#8595;</td>
-              <td><span class="{adj_cl}">Adj&nbsp;{adj_pct:.0f}%</span>&nbsp;<span class="{rep_cl}">Rep&nbsp;{rep_pct:.0f}%</span></td>
+              <td style="color:var(--suave)">{casos_mq}m &#8595;</td>
+              <td><span class="{adj_cl}">Adj {adj_pct:.0f}%</span> <span class="{rep_cl}">Rep {rep_pct:.0f}%</span></td>
             </tr>"""
         else:
             sub_row = ""
@@ -1022,15 +1022,15 @@ def _bloco_risco_relatorio(df_terr, nivel, label_acao, show_vendas=False, cfg=No
             <span style="font-size:10px;color:var(--suave)">{abs(vf):.0f}% abaixo da mediana{f" · {int(r['meses_queda'])}m em queda" if r['meses_queda'] > 0 else ""}</span>
           </td>
           {resp_cell}
-          <td style="font-weight:700">R$&nbsp;{brl(r['mes_atual'])}</td>
-          <td style="color:var(--suave)">R$&nbsp;{brl(fat_proj)}</td>
-          <td style="color:var(--suave)">R$&nbsp;{brl(r['media_12m'])}</td>
+          <td style="font-weight:700">R$ {brl(r['mes_atual'])}</td>
+          <td style="color:var(--suave)">R$ {brl(fat_proj)}</td>
+          <td style="color:var(--suave)">R$ {brl(r['media_12m'])}</td>
           <td class="{cor_vf}" style="font-weight:700">{vf:+.0f}%</td>
           <td style="color:var(--suave)">{int(r['meses_queda'])}m</td>
-          <td class="neg" style="font-weight:700">-R$&nbsp;{brl(r['impacto_rs'])}</td>
+          <td class="neg" style="font-weight:700">-R$ {brl(r['impacto_rs'])}</td>
         </tr>{sub_row}"""
 
-    col_resp_th = "<th>Respons&aacute;vel</th>" if show_vendas else ""
+    col_resp_th = "<th>Responsavel</th>" if show_vendas else ""
     col_resp_op = "<th></th>" if show_vendas else ""
     cli_w = "26%" if show_vendas else "32%"
 
@@ -1038,20 +1038,20 @@ def _bloco_risco_relatorio(df_terr, nivel, label_acao, show_vendas=False, cfg=No
     <div class="section">
       <div class="section-hd {cls_hd}">
         <span style="font-size:16px">{emoji}</span>
-        <span class="section-ttl">{nivel} &mdash; {label_acao}</span>
-        <span class="section-cnt">{n}&nbsp;cliente(s)</span>
+        <span class="section-ttl">{nivel} - {label_acao}</span>
+        <span class="section-cnt">{n} cliente(s)</span>
       </div>
       <div class="tbl-wrap">
         <table>
           <thead>
             <tr>
               <th style="width:{cli_w}">Cliente</th>{col_resp_th}
-              <th>MRR Atual</th><th>Proj.&nbsp;M&ecirc;s</th>
-              <th>Mediana&nbsp;12M</th><th>Varia&ccedil;&atilde;o</th>
-              <th>Meses&nbsp;&#8595;</th><th>Impacto/m&ecirc;s</th>
+              <th>MRR Atual</th><th>Proj. Mes</th>
+              <th>Mediana 12M</th><th>Variacao</th>
+              <th>Meses &#8595;</th><th>Impacto/mes</th>
             </tr>
             {f'''<tr>
-              <th>Tabela de Pre&ccedil;o</th>{col_resp_op}
+              <th>Tabela de Preco</th>{col_resp_op}
               <th>Casos Novos</th><th>Proj. Casos</th>
               <th>Med. Casos 12M</th><th>Var. Casos</th>
               <th>Meses &#8595;</th><th>Qualidade</th>
@@ -1066,16 +1066,16 @@ def _bloco_risco_relatorio(df_terr, nivel, label_acao, show_vendas=False, cfg=No
 def _legenda_relatorio():
     return """
     <div class="legenda">
-      <strong>MRR Atual</strong> Faturamento real do mês (ERP) &nbsp;&bull;&nbsp;
-      <strong>Proj. Mês</strong> Acumulado ÷ dias úteis decorridos × dias úteis totais &nbsp;&bull;&nbsp;
-      <strong>Mediana 12M</strong> Mediana dos últimos 12 meses com faturamento &gt; 0 &nbsp;&bull;&nbsp;
-      <strong>Variação</strong> (MRR Atual − Mediana) ÷ Mediana &nbsp;&bull;&nbsp;
-      <strong>Meses ↓</strong> Meses consecutivos de queda &nbsp;&bull;&nbsp;
+      <strong>MRR Atual</strong> Faturamento real do mes (ERP)  | 
+      <strong>Proj. Mes</strong> Acumulado ÷ dias uteis decorridos × dias uteis totais  | 
+      <strong>Mediana 12M</strong> Mediana dos ultimos 12 meses com faturamento > 0  | 
+      <strong>Variacao</strong> (MRR Atual − Mediana) ÷ Mediana  | 
+      <strong>Meses ↓</strong> Meses consecutivos de queda  | 
       <strong>Impacto</strong> Mediana − MRR Atual<br>
-      <strong>Casos Novos</strong> Pedidos únicos sem R ou A &nbsp;&bull;&nbsp;
-      <strong>Adj %</strong> Ajustes ÷ total pedidos &nbsp;&bull;&nbsp;
-      <strong>Rep %</strong> Repetições ÷ total pedidos &nbsp;&bull;&nbsp;
-      <span style="color:var(--vermelho)">Vermelho</span> quando Adj ou Rep &gt; 20%
+      <strong>Casos Novos</strong> Pedidos unicos sem R ou A  | 
+      <strong>Adj %</strong> Ajustes ÷ total pedidos  | 
+      <strong>Rep %</strong> Repeticoes ÷ total pedidos  | 
+      <span style="color:var(--vermelho)">Vermelho</span> quando Adj ou Rep > 20%
     </div>"""
 
 
@@ -1100,11 +1100,11 @@ def _footer_relatorio(mes_ref):
       <p>
         <strong>Analytics Kion Dental</strong><br>
         analytics@kiondental.tech<br>
-        Análise desenvolvida pelo <strong>Time de Tecnologia e Inovação da Kion</strong>
+        Analise desenvolvida pelo <strong>Time de Tecnologia e Inovacao da Kion</strong>
       </p>
       <p style="text-align:right">
         {KION_ARC}<br>
-        Gerado automaticamente &bull; {mes_ref.upper()}
+        Gerado automaticamente | {mes_ref.upper()}
       </p>
     </div>"""
 
@@ -1112,14 +1112,14 @@ def _footer_relatorio(mes_ref):
 def gerar_relatorio_territorio(nome_resp, codigo, df_terr, mes_ref, cfg, modo_teste):
     """HTML completo e moderno para o arquivo ANEXO (abre no browser)."""
     total_ativos  = len(df_terr)
-    em_risco      = df_terr[df_terr["risco"].isin(["ALTO", "MÉDIO"])]
+    em_risco      = df_terr[df_terr["risco"].isin(["ALTO", "MEDIO"])]
     fat_risco     = em_risco["mes_atual"].sum()
     impacto_total = em_risco["impacto_rs"].sum()
     fat_total     = df_terr["mes_atual"].sum()
     fat_proj      = float(df_terr.get("fat_projetado", df_terr["mes_atual"]).sum())
     n_alto        = (df_terr["risco"] == "ALTO").sum()
-    n_medio       = (df_terr["risco"] == "MÉDIO").sum()
-    n_atenc       = (df_terr["risco"] == "ATENÇÃO").sum()
+    n_medio       = (df_terr["risco"] == "MEDIO").sum()
+    n_atenc       = (df_terr["risco"] == "ATENCAO").sum()
     n_bloqueados  = (df_terr.get("status_financeiro", pd.Series([])).astype(str) == "Bloqueado").sum()
     total_casos   = int(df_terr.get("casos_novos_atual", pd.Series([0])).sum())
     casos_proj    = int(df_terr.get("casos_projetados", pd.Series([0])).sum())
@@ -1128,8 +1128,8 @@ def gerar_relatorio_territorio(nome_resp, codigo, df_terr, mes_ref, cfg, modo_te
 
     blocos = (
         _bloco_risco_relatorio(df_terr, "ALTO",    "LIGAR HOJE") +
-        _bloco_risco_relatorio(df_terr, "MÉDIO",   "CHECK-IN ESTA SEMANA") +
-        _bloco_risco_relatorio(df_terr, "ATENÇÃO", "MONITORAR")
+        _bloco_risco_relatorio(df_terr, "MEDIO",   "CHECK-IN ESTA SEMANA") +
+        _bloco_risco_relatorio(df_terr, "ATENCAO", "MONITORAR")
     ) or "<p style='color:var(--verde);font-size:13px'>✅ Nenhum cliente em risco no momento.</p>"
 
     kpis = _kpi_row_relatorio(fat_total, fat_proj, total_ativos, n_alto, n_medio,
@@ -1146,7 +1146,7 @@ def gerar_relatorio_territorio(nome_resp, codigo, df_terr, mes_ref, cfg, modo_te
   <div class="rpt-body">
     {banner}
     <p class="rpt-title">Alerta de Faturamento — {nome_resp} ({codigo})</p>
-    <p class="rpt-subtitle">{mes_ref.upper()} &bull; Carteira do responsável &bull; Gerado em {datetime.now().strftime('%d/%m/%Y %H:%M')}</p>
+    <p class="rpt-subtitle">{mes_ref.upper()} | Carteira do responsavel | Gerado em {datetime.now().strftime('%d/%m/%Y %H:%M')}</p>
     {kpis}
     {blocos}
     {_legenda_relatorio()}
@@ -1158,7 +1158,7 @@ def gerar_relatorio_territorio(nome_resp, codigo, df_terr, mes_ref, cfg, modo_te
 
 def gerar_relatorio_gestor(df_ativos, mes_ref, cfg, modo_teste):
     """HTML completo e moderno para o arquivo ANEXO do gestor."""
-    em_risco      = df_ativos[df_ativos["risco"].isin(["ALTO", "MÉDIO"])]
+    em_risco      = df_ativos[df_ativos["risco"].isin(["ALTO", "MEDIO"])]
     fat_total     = df_ativos["mes_atual"].sum()
     fat_proj      = float(df_ativos.get("fat_projetado", df_ativos["mes_atual"]).sum())
     fat_risco     = em_risco["mes_atual"].sum()
@@ -1167,29 +1167,29 @@ def gerar_relatorio_gestor(df_ativos, mes_ref, cfg, modo_teste):
     casos_total   = int(df_ativos.get("casos_novos_atual", pd.Series([0])).sum())
     casos_proj_t  = int(df_ativos.get("casos_projetados", pd.Series([0])).sum())
     n_alto        = (df_ativos["risco"] == "ALTO").sum()
-    n_medio       = (df_ativos["risco"] == "MÉDIO").sum()
-    n_atenc       = (df_ativos["risco"] == "ATENÇÃO").sum()
+    n_medio       = (df_ativos["risco"] == "MEDIO").sum()
+    n_atenc       = (df_ativos["risco"] == "ATENCAO").sum()
 
     banner = ""  # banner de teste removido
 
-    # Tabela de resumo por território
+    # Tabela de resumo por territorio
     linhas_terr = ""
     for cod, info in cfg["territorios"].items():
         t = df_ativos[df_ativos["vendas"] == cod]
-        t_risco = t[t["risco"].isin(["ALTO", "MÉDIO"])]
+        t_risco = t[t["risco"].isin(["ALTO", "MEDIO"])]
         if t.empty: continue
         t_fp   = float(t.get("fat_projetado", t["mes_atual"]).sum())
         t_cas  = int(t.get("casos_novos_atual", pd.Series([0])).sum())
         t_bloq = (t.get("status_financeiro", pd.Series([])).astype(str) == "Bloqueado").sum()
-        bloq_s = f' <span class="st-bloq" style="font-size:9px">&#128683;&nbsp;{t_bloq}</span>' if t_bloq > 0 else ""
+        bloq_s = f' <span class="st-bloq" style="font-size:9px">&#128683; {t_bloq}</span>' if t_bloq > 0 else ""
         linhas_terr += (
-            f"<tr><td><strong style='color:var(--azul)'>{cod}</strong>&nbsp;{info['nome']}</td>"
-            f"<td style='font-weight:600'>R$&nbsp;{brl(t['mes_atual'].sum())}"
-            f"<br><span style='font-size:10px;color:var(--suave)'>Proj:&nbsp;R$&nbsp;{brl(t_fp)}</span></td>"
+            f"<tr><td><strong style='color:var(--azul)'>{cod}</strong> {info['nome']}</td>"
+            f"<td style='font-weight:600'>R$ {brl(t['mes_atual'].sum())}"
+            f"<br><span style='font-size:10px;color:var(--suave)'>Proj: R$ {brl(t_fp)}</span></td>"
             f"<td>{len(t)}{bloq_s}</td>"
-            f"<td><span class='bdg bdg-alto'>{(t['risco']=='ALTO').sum()}</span>&nbsp;"
-            f"<span class='bdg bdg-medio'>{(t['risco']=='MÉDIO').sum()}</span></td>"
-            f"<td class='neg' style='font-weight:700'>-R$&nbsp;{brl(t_risco['impacto_rs'].sum())}</td>"
+            f"<td><span class='bdg bdg-alto'>{(t['risco']=='ALTO').sum()}</span> "
+            f"<span class='bdg bdg-medio'>{(t['risco']=='MEDIO').sum()}</span></td>"
+            f"<td class='neg' style='font-weight:700'>-R$ {brl(t_risco['impacto_rs'].sum())}</td>"
             f"<td style='color:var(--suave)'>{t_cas if t_cas > 0 else '—'}</td></tr>"
         )
 
@@ -1198,8 +1198,8 @@ def gerar_relatorio_gestor(df_ativos, mes_ref, cfg, modo_teste):
 
     blocos = (
         _bloco_risco_relatorio(df_ativos, "ALTO",    "LIGAR HOJE",           show_vendas=True, cfg=cfg) +
-        _bloco_risco_relatorio(df_ativos, "MÉDIO",   "CHECK-IN ESTA SEMANA", show_vendas=True, cfg=cfg) +
-        _bloco_risco_relatorio(df_ativos, "ATENÇÃO", "MONITORAR",            show_vendas=True, cfg=cfg)
+        _bloco_risco_relatorio(df_ativos, "MEDIO",   "CHECK-IN ESTA SEMANA", show_vendas=True, cfg=cfg) +
+        _bloco_risco_relatorio(df_ativos, "ATENCAO", "MONITORAR",            show_vendas=True, cfg=cfg)
     )
 
     return f"""<!DOCTYPE html>
@@ -1209,19 +1209,19 @@ def gerar_relatorio_gestor(df_ativos, mes_ref, cfg, modo_teste):
 <body>
 <button class="btn-print" onclick="window.print()">🖨 Imprimir</button>
 <div class="container">
-  {_header_relatorio('Visão Consolidada')}
+  {_header_relatorio('Visao Consolidada')}
   <div class="rpt-body">
     {banner}
-    <p class="rpt-title">Alerta de Faturamento — Visão Consolidada</p>
-    <p class="rpt-subtitle">{mes_ref.upper()} &bull; Todos os territórios &bull; Gerado em {datetime.now().strftime('%d/%m/%Y %H:%M')}</p>
+    <p class="rpt-title">Alerta de Faturamento — Visao Consolidada</p>
+    <p class="rpt-subtitle">{mes_ref.upper()} | Todos os territorios | Gerado em {datetime.now().strftime('%d/%m/%Y %H:%M')}</p>
     {kpis}
     <div class="section">
       <div class="section-hd atenc"><span style="font-size:16px">📊</span>
-        <span class="section-ttl">Resumo por Território</span>
+        <span class="section-ttl">Resumo por Territorio</span>
       </div>
       <div class="tbl-wrap"><table>
         <thead><tr>
-          <th>Território</th><th>Faturamento / Proj.</th><th>Ativos</th>
+          <th>Territorio</th><th>Faturamento / Proj.</th><th>Ativos</th>
           <th>Em Risco</th><th>Impacto</th><th>Casos Novos</th>
         </tr></thead>
         <tbody>{linhas_terr}</tbody>
@@ -1238,14 +1238,14 @@ def gerar_relatorio_gestor(df_ativos, mes_ref, cfg, modo_teste):
 def _corpo_simples(titulo, subtitulo, mes_ref, fat_total, fat_proj,
                    n_alto, n_medio, fat_risco, impacto, top5_linhas,
                    modo_teste, banner_txt, n_bloqueados=0, nome_arquivo=""):
-    """E-mail de notificação simples — corpo enxuto, detalhes no anexo."""
+    """E-mail de notificacao simples — corpo enxuto, detalhes no anexo."""
     bloq = (f"<tr><td colspan='3' style='padding:6px 0;color:#c0392b;font-size:11px'>"
             f"&#128683; {n_bloqueados} cliente(s) bloqueado(s)</td></tr>"
             if n_bloqueados > 0 else "")
     anexo_msg = (
         f"<p style='font-size:12px;color:#555;background:#f0fbff;"
         f"border-left:3px solid #00B1D2;padding:10px 14px;margin:0 0 16px;border-radius:0 4px 4px 0'>"
-        f"&#128206; O relatório completo está no arquivo <strong>{nome_arquivo}</strong> anexado a este e-mail."
+        f"&#128206; O relatorio completo esta no arquivo <strong>{nome_arquivo}</strong> anexado a este e-mail."
         f"</p>"
         if nome_arquivo else ""
     )
@@ -1265,26 +1265,26 @@ def _corpo_simples(titulo, subtitulo, mes_ref, fat_total, fat_proj,
       <tr>
         <td style="padding:12px 14px;border-right:1px solid #d6eaf8;vertical-align:top">
           <div class="kpi-label">Faturamento {mes_ref}</div>
-          <div class="kpi-value">R$&nbsp;{brl(fat_total)}</div>
-          <div class="kpi-sub">Proj:&nbsp;R$&nbsp;{brl(fat_proj)}</div>
+          <div class="kpi-value">R$ {brl(fat_total)}</div>
+          <div class="kpi-sub">Proj: R$ {brl(fat_proj)}</div>
         </td>
         <td style="padding:12px 14px;border-right:1px solid #d6eaf8;vertical-align:top">
           <div class="kpi-label">Em Risco</div>
           <div class="kpi-value" style="color:#c0392b">{n_alto + n_medio}</div>
           <div class="kpi-sub">
-            <span class="badge badge-alto">&#128308;&nbsp;{n_alto}</span>&nbsp;
-            <span class="badge badge-medio">&#128993;&nbsp;{n_medio}</span>
+            <span class="badge badge-alto">&#128308; {n_alto}</span> 
+            <span class="badge badge-medio">&#128993; {n_medio}</span>
           </div>
         </td>
         <td style="padding:12px 14px;border-right:1px solid #d6eaf8;vertical-align:top">
           <div class="kpi-label">Fat. em Risco</div>
-          <div class="kpi-value" style="color:#c0392b">R$&nbsp;{brl(fat_risco)}</div>
-          <div class="kpi-sub">{fat_risco/fat_total*100:.1f}%&nbsp;da&nbsp;carteira</div>
+          <div class="kpi-value" style="color:#c0392b">R$ {brl(fat_risco)}</div>
+          <div class="kpi-sub">{fat_risco/fat_total*100:.1f}% da carteira</div>
         </td>
         <td style="padding:12px 14px;vertical-align:top">
-          <div class="kpi-label">Impacto vs.&nbsp;Mediana</div>
-          <div class="kpi-value" style="color:#c0392b">-R$&nbsp;{brl(impacto)}</div>
-          <div class="kpi-sub">por&nbsp;m&ecirc;s</div>
+          <div class="kpi-label">Impacto vs. Mediana</div>
+          <div class="kpi-value" style="color:#c0392b">-R$ {brl(impacto)}</div>
+          <div class="kpi-sub">por mes</div>
         </td>
       </tr>
     </table>
@@ -1293,7 +1293,7 @@ def _corpo_simples(titulo, subtitulo, mes_ref, fat_total, fat_proj,
     </p>
     <table>
       <thead><tr>
-        <th>Cliente</th><th>MRR Atual</th><th>Impacto/m&ecirc;s</th>
+        <th>Cliente</th><th>MRR Atual</th><th>Impacto/mes</th>
       </tr></thead>
       <tbody>{bloq}{top5_linhas}</tbody>
     </table>
@@ -1307,14 +1307,14 @@ def gerar_email_territorio(nome_resp, codigo, df_terr, mes_ref, cfg, modo_teste,
                             nome_arquivo=""):
     """Corpo simples do e-mail — detalhes completos no anexo HTML."""
     total_ativos = len(df_terr)
-    em_risco     = df_terr[df_terr["risco"].isin(["ALTO", "MÉDIO"])]
+    em_risco     = df_terr[df_terr["risco"].isin(["ALTO", "MEDIO"])]
     fat_total    = df_terr["mes_atual"].sum()          # acumulado do setor em junho
     n_alto       = (df_terr["risco"] == "ALTO").sum()
-    n_medio      = (df_terr["risco"] == "MÉDIO").sum()
-    n_atenc      = (df_terr["risco"] == "ATENÇÃO").sum()
+    n_medio      = (df_terr["risco"] == "MEDIO").sum()
+    n_atenc      = (df_terr["risco"] == "ATENCAO").sum()
 
-    # ── Projeção no nível do setor ─────────────────────────────────────────
-    # acumulado do setor ÷ dias úteis decorridos × dias úteis restantes
+    # ── Projecao no nivel do setor ─────────────────────────────────────────
+    # acumulado do setor ÷ dias uteis decorridos × dias uteis restantes
     _periodo  = mes_str_to_period(mes_ref)
     _hoje     = SIM_DATE if SIM_DATE is not None else pd.Timestamp.now()
     _du_total = dias_uteis_mes(_periodo.year, _periodo.month)
@@ -1325,7 +1325,7 @@ def gerar_email_territorio(nome_resp, codigo, df_terr, mes_ref, cfg, modo_teste,
     else:
         fat_proj = float(fat_total)
 
-    # ── Faturamento e impacto em risco (baseado na projeção) ──────────────
+    # ── Faturamento e impacto em risco (baseado na projecao) ──────────────
     fat_risco     = em_risco["fat_projetado"].sum()
     impacto_total = em_risco["impacto_rs"].sum()
 
@@ -1338,28 +1338,28 @@ def gerar_email_territorio(nome_resp, codigo, df_terr, mes_ref, cfg, modo_teste,
         st = _status_badge(r)
         top5_linhas += (
             f"<tr><td><strong>{r['Cliente']}</strong>{st}</td>"
-            f"<td>R$&nbsp;{brl(r['mes_atual'])}</td>"
-            f"<td style='color:#c0392b;font-weight:700'>-R$&nbsp;{brl(r['impacto_rs'])}</td></tr>"
+            f"<td>R$ {brl(r['mes_atual'])}</td>"
+            f"<td style='color:#c0392b;font-weight:700'>-R$ {brl(r['impacto_rs'])}</td></tr>"
         )
 
     return _corpo_simples(
-        titulo=f"Alerta de Faturamento &mdash; {nome_resp} ({codigo})",
-        subtitulo=f"{mes_ref.upper()} &bull; {total_ativos} clientes ativos &bull; Gerado em {datetime.now().strftime('%d/%m/%Y %H:%M')}",
+        titulo=f"Alerta de Faturamento - {nome_resp} ({codigo})",
+        subtitulo=f"{mes_ref.upper()} | {total_ativos} clientes ativos | Gerado em {datetime.now().strftime('%d/%m/%Y %H:%M')}",
         mes_ref=mes_ref, fat_total=fat_total, fat_proj=fat_proj,
         n_alto=n_alto, n_medio=n_medio, fat_risco=fat_risco,
         impacto=impacto_total, top5_linhas=top5_linhas,
         modo_teste=modo_teste,
-        banner_txt=f"Em produ&ccedil;&atilde;o este e-mail vai para {nome_resp}",
+        banner_txt=f"Em producao este e-mail vai para {nome_resp}",
         n_bloqueados=n_bloqueados, nome_arquivo=nome_arquivo,
     )
 
 
 def gerar_email_gestor(df_ativos, mes_ref, cfg, modo_teste, nome_arquivo=""):
     """Corpo simples do e-mail consolidado — detalhes no anexo HTML."""
-    em_risco  = df_ativos[df_ativos["risco"].isin(["ALTO", "MÉDIO"])]
+    em_risco  = df_ativos[df_ativos["risco"].isin(["ALTO", "MEDIO"])]
     fat_total = df_ativos["mes_atual"].sum()
 
-    # Projeção consolidada no nível da base
+    # Projecao consolidada no nivel da base
     _periodo  = mes_str_to_period(mes_ref)
     _hoje     = SIM_DATE if SIM_DATE is not None else pd.Timestamp.now()
     _du_total = dias_uteis_mes(_periodo.year, _periodo.month)
@@ -1374,9 +1374,9 @@ def gerar_email_gestor(df_ativos, mes_ref, cfg, modo_teste, nome_arquivo=""):
     impacto_tot = em_risco["impacto_rs"].sum()
     n_bloqueados  = (df_ativos.get("status_financeiro", pd.Series([])).astype(str) == "Bloqueado").sum()
     n_alto_total  = (df_ativos["risco"] == "ALTO").sum()
-    n_medio_total = (df_ativos["risco"] == "MÉDIO").sum()
+    n_medio_total = (df_ativos["risco"] == "MEDIO").sum()
 
-    # Top 5 ALTO por impacto (todos os territórios)
+    # Top 5 ALTO por impacto (todos os territorios)
     top5 = df_ativos[df_ativos["risco"] == "ALTO"].sort_values("impacto_rs", ascending=False).head(5)
     top5_linhas = ""
     for _, r in top5.iterrows():
@@ -1385,44 +1385,44 @@ def gerar_email_gestor(df_ativos, mes_ref, cfg, modo_teste, nome_arquivo=""):
         st = _status_badge(r)
         top5_linhas += (
             f"<tr><td><strong>{r['Cliente']}</strong>{st}"
-            f"<br><small style='color:#9AA0A6'>{terr}&nbsp;{nome_r}</small></td>"
-            f"<td>R$&nbsp;{brl(r['mes_atual'])}</td>"
-            f"<td style='color:#c0392b;font-weight:700'>-R$&nbsp;{brl(r['impacto_rs'])}</td></tr>"
+            f"<br><small style='color:#9AA0A6'>{terr} {nome_r}</small></td>"
+            f"<td>R$ {brl(r['mes_atual'])}</td>"
+            f"<td style='color:#c0392b;font-weight:700'>-R$ {brl(r['impacto_rs'])}</td></tr>"
         )
 
-    # Resumo de territórios como linhas extras
+    # Resumo de territorios como linhas extras
     linhas_terr = ""
     for cod, info in cfg["territorios"].items():
         t       = df_ativos[df_ativos["vendas"] == cod]
-        t_risco = t[t["risco"].isin(["ALTO", "MÉDIO"])]
+        t_risco = t[t["risco"].isin(["ALTO", "MEDIO"])]
         if t.empty:
             continue
         t_fat_proj = float(t.get("fat_projetado", t["mes_atual"]).sum())
         t_bloq     = (t.get("status_financeiro", pd.Series([])).astype(str) == "Bloqueado").sum()
-        bloq_txt   = f"&nbsp;<span style='color:#c0392b;font-size:10px'>&#128683;&nbsp;{t_bloq}</span>" if t_bloq > 0 else ""
+        bloq_txt   = f" <span style='color:#c0392b;font-size:10px'>&#128683; {t_bloq}</span>" if t_bloq > 0 else ""
         linhas_terr += (
             f"<tr>"
-            f"<td><strong style='color:#00B1D2'>{cod}</strong>&nbsp;{info['nome']}</td>"
-            f"<td style='font-weight:700'>R$&nbsp;{brl(t['mes_atual'].sum())}"
-            f"<br><small style='color:#9AA0A6'>Proj:&nbsp;R$&nbsp;{brl(t_fat_proj)}</small></td>"
+            f"<td><strong style='color:#00B1D2'>{cod}</strong> {info['nome']}</td>"
+            f"<td style='font-weight:700'>R$ {brl(t['mes_atual'].sum())}"
+            f"<br><small style='color:#9AA0A6'>Proj: R$ {brl(t_fat_proj)}</small></td>"
             f"<td>{len(t)}{bloq_txt}</td>"
             f"<td><span class='badge badge-alto'>{(t['risco']=='ALTO').sum()}</span>"
-            f"&nbsp;<span class='badge badge-medio'>{(t['risco']=='MÉDIO').sum()}</span></td>"
-            f"<td style='font-weight:700;color:#c0392b'>-R$&nbsp;{brl(t_risco['impacto_rs'].sum())}</td>"
+            f" <span class='badge badge-medio'>{(t['risco']=='MEDIO').sum()}</span></td>"
+            f"<td style='font-weight:700;color:#c0392b'>-R$ {brl(t_risco['impacto_rs'].sum())}</td>"
             f"</tr>"
         )
 
-    # Corpo simples: top 5 + resumo por território
+    # Corpo simples: top 5 + resumo por territorio
     full_top5 = top5_linhas + linhas_terr
 
     return _corpo_simples(
-        titulo="Alerta de Faturamento &mdash; Vis&atilde;o Consolidada",
-        subtitulo=f"{mes_ref.upper()} &bull; Todos os territ&oacute;rios &bull; Gerado em {datetime.now().strftime('%d/%m/%Y %H:%M')}",
+        titulo="Alerta de Faturamento - Visao Consolidada",
+        subtitulo=f"{mes_ref.upper()} | Todos os territorios | Gerado em {datetime.now().strftime('%d/%m/%Y %H:%M')}",
         mes_ref=mes_ref, fat_total=fat_total, fat_proj=fat_proj_tot,
         n_alto=n_alto_total, n_medio=n_medio_total, fat_risco=fat_risco,
         impacto=impacto_tot, top5_linhas=full_top5,
         modo_teste=modo_teste,
-        banner_txt="Em produ&ccedil;&atilde;o este e-mail vai para Bruno Garcia",
+        banner_txt="Em producao este e-mail vai para Bruno Garcia",
         n_bloqueados=n_bloqueados, nome_arquivo=nome_arquivo,
     )
 
@@ -1436,7 +1436,7 @@ def _get_graph_token():
     client_id     = os.environ.get("GRAPH_CLIENT_ID", "")
     client_secret = os.environ.get("GRAPH_CLIENT_SECRET", "")
     if not all([tenant_id, client_id, client_secret]):
-        raise ValueError("GRAPH_TENANT_ID, GRAPH_CLIENT_ID, GRAPH_CLIENT_SECRET não configurados.")
+        raise ValueError("GRAPH_TENANT_ID, GRAPH_CLIENT_ID, GRAPH_CLIENT_SECRET nao configurados.")
     resp = requests.post(
         f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token",
         data={"grant_type": "client_credentials", "client_id": client_id,
@@ -1451,8 +1451,8 @@ def enviar_email(assunto, html, destinatarios, cfg, dry_run=False,
                  nome_anexo=None, html_anexo=None):
     """
     Envia e-mail via Microsoft Graph API.
-    html       → corpo do e-mail (notificação simples)
-    html_anexo → conteúdo do arquivo anexo (relatório completo)
+    html       → corpo do e-mail (notificacao simples)
+    html_anexo → conteudo do arquivo anexo (relatorio completo)
     nome_anexo → nome do arquivo .html anexado
     """
     if not isinstance(destinatarios, list):
@@ -1464,7 +1464,7 @@ def enviar_email(assunto, html, destinatarios, cfg, dry_run=False,
         token = _get_graph_token()
         rem   = cfg["remetente"]
 
-        # Anexa o relatório completo (html_anexo), não o corpo simples
+        # Anexa o relatorio completo (html_anexo), nao o corpo simples
         attachments = []
         conteudo_anexo = html_anexo or html
         if nome_anexo and cfg.get("envio", {}).get("anexar_html", False):
@@ -1516,7 +1516,7 @@ def main():
     logging.info(f"  {datetime.now().strftime('%d/%m/%Y %H:%M')}  |  dry-run={DRY_RUN}  |  preview={PREVIEW}")
     logging.info("=" * 55)
 
-    # Verificar se o disparo está ativo
+    # Verificar se o disparo esta ativo
     if not cfg.get("ativo", True) and not PREVIEW and not DRY_RUN:
         logging.info("  ⏸  Sistema PAUSADO (ativo: false no config.yaml) — nenhum e-mail enviado.")
         logging.info("  Para ativar: altere 'ativo: true' no config/config.yaml")
@@ -1540,7 +1540,7 @@ def main():
             df_terr = df_ativos[df_ativos["vendas"] == cod]
             if df_terr.empty:
                 continue
-            # Salva o relatório completo (anexo) como preview
+            # Salva o relatorio completo (anexo) como preview
             html = gerar_relatorio_territorio(info["nome"], cod, df_terr, mes_ref, cfg, True)
             path = os.path.join(preview_dir, f"{cod}_{info['nome']}.html")
             with open(path, "w", encoding="utf-8") as f:
@@ -1560,7 +1560,7 @@ def main():
     # ── Envio normal ───────────────────────────────────────────────────────
     enviados = falhas = 0
 
-    logging.info("Gerando e-mails por território...")
+    logging.info("Gerando e-mails por territorio...")
     for cod, info in cfg["territorios"].items():
         df_terr = df_ativos[df_ativos["vendas"] == cod]
         if df_terr.empty:
@@ -1568,8 +1568,8 @@ def main():
             continue
 
         n_alto  = (df_terr["risco"] == "ALTO").sum()
-        n_medio = (df_terr["risco"] == "MÉDIO").sum()
-        impacto = df_terr[df_terr["risco"].isin(["ALTO", "MÉDIO"])]["impacto_rs"].sum()
+        n_medio = (df_terr["risco"] == "MEDIO").sum()
+        impacto = df_terr[df_terr["risco"].isin(["ALTO", "MEDIO"])]["impacto_rs"].sum()
         assunto = (
             f"{prefixo}[Churn Alert] {mes_ref.upper()} | "
             f"{cod} {info['nome']} | "
@@ -1587,12 +1587,12 @@ def main():
         else:  falhas   += 1
 
     logging.info("Gerando e-mail consolidado para o gestor...")
-    em_risco_total = df_ativos[df_ativos["risco"].isin(["ALTO", "MÉDIO"])]
+    em_risco_total = df_ativos[df_ativos["risco"].isin(["ALTO", "MEDIO"])]
     assunto_gestor = (
         f"{prefixo}[Churn CONSOLIDADO] {mes_ref.upper()} | "
         f"R$ {brl(em_risco_total['impacto_rs'].sum())} em risco | "
         f"🔴 {(df_ativos['risco'] == 'ALTO').sum()} | "
-        f"🟡 {(df_ativos['risco'] == 'MÉDIO').sum()}"
+        f"🟡 {(df_ativos['risco'] == 'MEDIO').sum()}"
     )
     nome_anexo_g   = f"Alerta_CONSOLIDADO_{mes_ref.replace(' ','').upper()}.html"
     html_gestor    = gerar_email_gestor(df_ativos, mes_ref, cfg, modo_teste, nome_arquivo=nome_anexo_g)
@@ -1605,7 +1605,7 @@ def main():
     else:  falhas   += 1
 
     logging.info("=" * 55)
-    logging.info(f"  Concluído — {enviados} enviados | {falhas} falhas")
+    logging.info(f"  Concluido — {enviados} enviados | {falhas} falhas")
     logging.info("=" * 55)
 
 
