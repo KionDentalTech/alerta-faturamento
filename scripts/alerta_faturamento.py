@@ -1097,9 +1097,13 @@ def _footer_relatorio(mes_ref):
 
 
 def _row_cliente(r, show_vendas=False, cfg=None):
-    """Linha de cliente para a tabela Mes Corrente."""
+    """Linha principal + sub-linha operacional por cliente."""
     fat_proj  = float(r.get("fat_projetado") or r["mes_atual"])
     casos     = int(r.get("casos_novos_atual") or 0)
+    casos_prj = int(r.get("casos_projetados") or casos)
+    casos_med = float(r.get("casos_mediana_12m") or 0)
+    casos_var = r.get("casos_var_pct")
+    casos_mq  = int(r.get("casos_meses_queda") or 0)
     adj_pct   = float(r.get("adj_pct_atual") or 0)
     rep_pct   = float(r.get("rep_pct_atual") or 0)
     vf        = r["variacao_pct"] if not pd.isna(r.get("variacao_pct")) else 0
@@ -1114,23 +1118,30 @@ def _row_cliente(r, show_vendas=False, cfg=None):
     elif status == "Inativo":
         st_badge = ' <span class="st-inat">INATIVO</span>'
 
-    resp_cell = ""
+    resp_main = resp_sub = ""
     if show_vendas and cfg:
         terr = str(r.get("vendas") or "—")
         nome_r = cfg.get("territorios", {}).get(terr, {}).get("nome", terr) if terr != "—" else "—"
-        resp_cell = f"<td><strong style='color:var(--azul)'>{terr}</strong><br><span style='color:var(--suave);font-size:11px'>{nome_r}</span></td>"
+        resp_main = f"<td><strong style='color:var(--azul)'>{terr}</strong><br><span style='color:var(--suave);font-size:11px'>{nome_r}</span></td>"
+        resp_sub  = "<td></td>"
 
     adj_cl = "neg" if adj_pct > 20 else ""
     rep_cl = "neg" if rep_pct > 20 else ""
     tabela = str(r.get("tabela") or "")
     if pd.isna(r.get("tabela")): tabela = ""
 
+    # Variacao de casos
+    if casos_var is not None and not pd.isna(casos_var):
+        cor_vc = "neg" if casos_var < -10 else ("pos" if casos_var > 5 else "")
+        vc_str = f"<span class='{cor_vc}'>{casos_var:+.0f}%</span>"
+    else:
+        vc_str = "—"
+
     return f"""<tr>
-      <td style="padding:8px 10px 4px">
-        <strong style="font-size:12px">{r['Cliente']}</strong>{st_badge}<br>
-        <span style="font-size:10px;color:var(--suave)">{tabela}</span>
+      <td style="padding:9px 10px 4px">
+        <strong style="font-size:12px">{r['Cliente']}</strong>{st_badge}
       </td>
-      {resp_cell}
+      {resp_main}
       <td style="font-weight:700">R$ {brl(r['mes_atual'])}</td>
       <td style="color:var(--suave)">R$ {brl(fat_proj)}</td>
       <td style="color:var(--suave)">R$ {brl(r['media_12m'])}</td>
@@ -1139,17 +1150,41 @@ def _row_cliente(r, show_vendas=False, cfg=None):
       <td class="neg" style="font-weight:700">-R$ {brl(r['impacto_rs'])}</td>
       <td style="color:var(--azul);font-weight:700">{casos}</td>
       <td><span class="{adj_cl}">Adj {adj_pct:.0f}%</span> <span class="{rep_cl}">Rep {rep_pct:.0f}%</span></td>
+    </tr>
+    <tr class="op-row">
+      <td style="color:var(--suave);font-style:italic">{tabela}</td>
+      {resp_sub}
+      <td></td>
+      <td style="color:var(--suave)">{casos_prj}</td>
+      <td style="color:var(--suave)">{casos_med:.0f}</td>
+      <td>{vc_str}</td>
+      <td style="color:var(--suave)">{casos_mq}m &darr;</td>
+      <td></td>
+      <td></td>
+      <td></td>
     </tr>"""
 
 
 def _cabecalho_tabela(show_vendas=False):
-    resp_th = "<th>Responsavel</th>" if show_vendas else ""
+    resp_th1 = "<th>Responsavel</th>" if show_vendas else ""
+    resp_th2 = "<th></th>" if show_vendas else ""
     return f"""<thead>
       <tr>
-        <th style="width:26%">Cliente</th>{resp_th}
+        <th style="width:24%">Cliente</th>{resp_th1}
         <th>MRR Atual</th><th>Proj. Mes</th><th>Mediana 12M</th>
         <th>Variacao</th><th>Meses &darr;</th><th>Impacto/mes</th>
         <th>Casos</th><th>Qualidade</th>
+      </tr>
+      <tr style="background:#e8f8fd">
+        <th style="color:#00B1D2;font-size:10px;font-weight:600">Tabela de Preco</th>{resp_th2}
+        <th style="color:#00B1D2;font-size:10px;font-weight:600"></th>
+        <th style="color:#00B1D2;font-size:10px;font-weight:600">Proj. Casos</th>
+        <th style="color:#00B1D2;font-size:10px;font-weight:600">Med. Casos 12M</th>
+        <th style="color:#00B1D2;font-size:10px;font-weight:600">Var. Casos</th>
+        <th style="color:#00B1D2;font-size:10px;font-weight:600">Meses &darr;</th>
+        <th style="color:#00B1D2;font-size:10px;font-weight:600"></th>
+        <th style="color:#00B1D2;font-size:10px;font-weight:600">Casos Novos</th>
+        <th style="color:#00B1D2;font-size:10px;font-weight:600">Qualidade</th>
       </tr>
     </thead>"""
 
