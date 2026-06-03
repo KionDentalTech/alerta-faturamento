@@ -744,6 +744,17 @@ CSS_RELATORIO = """
   .rpt-footer p{font-size:11px;color:#8D8E8F;line-height:1.8}
   .rpt-footer strong{color:var(--azul-vivo)}
 
+  /* ── Tendencia Critica — container pai ── */
+  .tc-wrapper{border:2px solid #c0392b;border-radius:10px;margin-bottom:28px;overflow:hidden}
+  .tc-header{background:#c0392b;color:#fff;padding:12px 20px;display:flex;align-items:center;gap:10px}
+  .tc-header-title{font-size:14px;font-weight:700;letter-spacing:.5px}
+  .tc-header-sub{font-size:11px;opacity:.8;margin-left:auto}
+  .tc-body{padding:16px;background:#fdf8f8;display:flex;flex-direction:column;gap:14px}
+  .tc-child{background:#fff;border:1px solid #f0d5d5;border-radius:7px;overflow:hidden}
+  .tc-child-hd{display:flex;align-items:center;gap:8px;padding:9px 14px;
+               background:#fff5f5;border-bottom:1px solid #f0d5d5}
+  .tc-child-title{font-size:12px;font-weight:700;color:#c0392b}
+
   /* ── Botao imprimir ── */
   .btn-print{position:fixed;bottom:20px;right:20px;background:var(--azul);color:#fff;border:none;padding:10px 18px;border-radius:20px;font-size:12px;font-weight:600;cursor:pointer;box-shadow:0 3px 10px rgba(0,177,210,.35);z-index:99}
   .btn-print:hover{background:#009ab8}
@@ -1203,32 +1214,42 @@ def _cabecalho_tabela(show_vendas=False):
     </thead>"""
 
 
-def _tendencia_critica(df, show_vendas=False, cfg=None):
-    """TOP 5 queda de casos novos + TOP 5 queda de faturamento."""
+def _tc_filho(icone, titulo, conteudo_html):
+    """Card filho dentro do container Tendencia Critica."""
+    return f"""
+    <div class="tc-child">
+      <div class="tc-child-hd">
+        <span style="font-size:15px">{icone}</span>
+        <span class="tc-child-title">{titulo}</span>
+      </div>
+      {conteudo_html}
+    </div>"""
 
-    # TOP 5 - queda de casos novos (maior queda percentual)
+
+def _tendencia_critica(df, show_vendas=False, cfg=None):
+    """Container pai TENDENCIA CRITICA com 3 filhos TOP 5."""
+    resp_th = "<th>Responsavel</th>" if show_vendas else ""
+    vazio = f'<tr><td colspan="9" style="color:var(--suave);padding:12px">Sem dados suficientes</td></tr>'
+
+    # ── Filho 1: TOP 5 queda de casos novos ──────────────────────────────
+    filho1 = ""
     tem_casos = "casos_novos_atual" in df.columns and df["casos_novos_atual"].sum() > 0
-    top5_casos_html = ""
     if tem_casos:
         df_casos = df[
             (df.get("casos_mediana_12m", pd.Series([0])) > 0) &
             (df["casos_novos_atual"] < df.get("casos_mediana_12m", pd.Series([0])))
         ].copy()
-        df_casos["queda_casos"] = (
-            df_casos["casos_mediana_12m"] - df_casos["casos_novos_atual"]
-        )
-        top5_c = df_casos.sort_values("queda_casos", ascending=False).head(5)
+        df_casos["queda_casos"] = df_casos["casos_mediana_12m"] - df_casos["casos_novos_atual"]
         rows_c = ""
-        for _, r in top5_c.iterrows():
-            casos    = int(r.get("casos_novos_atual") or 0)
-            casos_p  = int(r.get("casos_projetados") or 0)
-            med_c    = float(r.get("casos_mediana_12m") or 0)
-            var_c    = r.get("casos_var_pct")
-            mq_c     = int(r.get("casos_meses_queda") or 0)
-            vc_str   = f"{var_c:+.0f}%" if var_c is not None and not pd.isna(var_c) else "—"
-            tabela   = str(r.get("tabela") or "")
-            if pd.isna(r.get("tabela")): tabela = ""
-            resp_c   = ""
+        for _, r in df_casos.sort_values("queda_casos", ascending=False).head(5).iterrows():
+            casos  = int(r.get("casos_novos_atual") or 0)
+            casos_p = int(r.get("casos_projetados") or 0)
+            med_c  = float(r.get("casos_mediana_12m") or 0)
+            var_c  = r.get("casos_var_pct")
+            mq_c   = int(r.get("casos_meses_queda") or 0)
+            vc_str = f"{var_c:+.0f}%" if var_c is not None and not pd.isna(var_c) else "—"
+            tabela = str(r.get("tabela") or ""); tabela = "" if pd.isna(r.get("tabela")) else tabela
+            resp_c = ""
             if show_vendas and cfg:
                 terr = str(r.get("vendas") or "—")
                 nome_r = cfg.get("territorios", {}).get(terr, {}).get("nome", terr) if terr != "—" else "—"
@@ -1244,68 +1265,50 @@ def _tendencia_critica(df, show_vendas=False, cfg=None):
                 f"<td style='color:var(--suave)'>{mq_c}m</td>"
                 f"</tr>"
             )
-        resp_th_c = "<th>Responsavel</th>" if show_vendas else ""
-        top5_casos_html = f"""
-        <div class="section">
-          <div class="section-hd alto">
-            <span style="font-size:16px">📋</span>
-            <span class="section-ttl">TOP 5 - Queda de Casos Novos</span>
-          </div>
+        filho1 = _tc_filho("📋", "TOP 5 - Queda de Casos Novos", f"""
           <div class="tbl-wrap"><table>
             <thead><tr>
-              <th style="width:30%">Cliente</th>{resp_th_c}
+              <th style="width:30%">Cliente</th>{resp_th}
               <th>Casos Novos</th><th>Proj. Casos</th>
               <th>Med. 12M</th><th>Variacao</th><th>Meses &darr;</th>
             </tr></thead>
-            <tbody>{rows_c}</tbody>
-          </table></div>
-        </div>"""
+            <tbody>{rows_c or vazio}</tbody>
+          </table></div>""")
 
-    # TOP 5 - queda de faturamento (maior impacto em R$)
-    df_fat = df[df["impacto_rs"] > 0].sort_values("impacto_rs", ascending=False).head(5)
-    rows_f = ""
-    for _, r in df_fat.iterrows():
-        rows_f += _row_cliente(r, show_vendas=show_vendas, cfg=cfg)
-    resp_th_f = "<th>Responsavel</th>" if show_vendas else ""
-    top5_fat_html = f"""
-    <div class="section">
-      <div class="section-hd medio">
-        <span style="font-size:16px">💰</span>
-        <span class="section-ttl">TOP 5 - Queda de Faturamento</span>
-      </div>
+    # ── Filho 2: TOP 5 queda de faturamento ──────────────────────────────
+    rows_f = "".join(
+        _row_cliente(r, show_vendas=show_vendas, cfg=cfg)
+        for _, r in df[df["impacto_rs"] > 0].sort_values("impacto_rs", ascending=False).head(5).iterrows()
+    )
+    filho2 = _tc_filho("💰", "TOP 5 - Queda de Faturamento", f"""
       <div class="tbl-wrap"><table>
         {_cabecalho_tabela(show_vendas)}
-        <tbody>{rows_f or '<tr><td colspan="9" style="color:var(--suave)">Nenhum cliente em queda</td></tr>'}</tbody>
-      </table></div>
-    </div>"""
+        <tbody>{rows_f or vazio}</tbody>
+      </table></div>""")
 
-    # TOP 5 — mais meses consecutivos abaixo da mediana de faturamento
-    df_meses = df[df["meses_queda"] > 0].sort_values("meses_queda", ascending=False).head(5)
-    rows_m = ""
-    for _, r in df_meses.iterrows():
-        rows_m += _row_cliente(r, show_vendas=show_vendas, cfg=cfg)
-    resp_th_m = "<th>Responsavel</th>" if show_vendas else ""
-    top5_meses_html = f"""
-    <div class="section">
-      <div class="section-hd" style="background:#fdf3e3;border-left:4px solid var(--laranja)">
-        <span style="font-size:16px">📅</span>
-        <span class="section-ttl">TOP 5 - Mais Meses Abaixo da Mediana</span>
-      </div>
+    # ── Filho 3: TOP 5 mais meses abaixo da mediana ───────────────────────
+    rows_m = "".join(
+        _row_cliente(r, show_vendas=show_vendas, cfg=cfg)
+        for _, r in df[df["meses_queda"] > 0].sort_values("meses_queda", ascending=False).head(5).iterrows()
+    )
+    filho3 = _tc_filho("📅", "TOP 5 - Mais Meses Abaixo da Mediana", f"""
       <div class="tbl-wrap"><table>
         {_cabecalho_tabela(show_vendas)}
-        <tbody>{rows_m or '<tr><td colspan="9" style="color:var(--suave)">Nenhum cliente com historico de queda</td></tr>'}</tbody>
-      </table></div>
-    </div>"""
+        <tbody>{rows_m or vazio}</tbody>
+      </table></div>""")
 
     return f"""
-    <div class="section">
-      <div class="section-hd alto" style="border-left:4px solid #c0392b;margin-bottom:12px">
-        <span style="font-size:15px">⚠️</span>
-        <span class="section-ttl" style="font-size:14px">TENDENCIA CRITICA</span>
+    <div class="tc-wrapper">
+      <div class="tc-header">
+        <span style="font-size:18px">⚠️</span>
+        <span class="tc-header-title">TENDENCIA CRITICA</span>
+        <span class="tc-header-sub">Clientes que necessitam atencao imediata</span>
       </div>
-      {top5_casos_html}
-      {top5_fat_html}
-      {top5_meses_html}
+      <div class="tc-body">
+        {filho1}
+        {filho2}
+        {filho3}
+      </div>
     </div>"""
 
 
