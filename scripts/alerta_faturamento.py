@@ -32,6 +32,15 @@ import requests
 import yaml
 
 # ─────────────────────────────────────────────
+#  HELPERS
+# ─────────────────────────────────────────────
+
+def brl(v) -> str:
+    """Formata número no padrão brasileiro: 1.234.567 (ponto como separador de milhar)."""
+    return f"{float(v or 0):,.0f}".replace(",", ".")
+
+
+# ─────────────────────────────────────────────
 #  CONFIGURAÇÃO
 # ─────────────────────────────────────────────
 
@@ -608,12 +617,12 @@ def _bloco_risco(df_terr, nivel, label_acao, show_vendas=False, cfg=None) -> str
             {_narrativa(r)}
           </td>
           {resp_cell}
-          <td style="font-weight:700">R$&nbsp;{r['mes_atual']:,.0f}</td>
-          <td style="color:#555">R$&nbsp;{fat_proj:,.0f}</td>
-          <td style="color:#888">R$&nbsp;{r['media_12m']:,.0f}</td>
+          <td style="font-weight:700">R$&nbsp;{brl(r['mes_atual'])}</td>
+          <td style="color:#555">R$&nbsp;{brl(fat_proj)}</td>
+          <td style="color:#888">R$&nbsp;{brl(r['media_12m'])}</td>
           <td style="font-weight:700;color:{cor_vf}">{vf:+.0f}%</td>
           <td style="color:#555">{int(r['meses_queda'])}m</td>
-          <td style="font-weight:700;color:#c0392b">-R$&nbsp;{r['impacto_rs']:,.0f}</td>
+          <td style="font-weight:700;color:#c0392b">-R$&nbsp;{brl(r['impacto_rs'])}</td>
         </tr>{sub_row}"""
 
     col_resp_th = "<th>Respons&aacute;vel</th>" if show_vendas else ""
@@ -903,8 +912,8 @@ def _kpi_row_relatorio(fat_total, fat_proj, total_ativos, n_alto, n_medio,
     <div class="kpi-row">
       <div class="kpi-card destaque">
         <div class="kpi-lbl">Faturamento {mes_ref}</div>
-        <div class="kpi-val">R$&nbsp;{fat_total:,.0f}</div>
-        <div class="kpi-sub">Proj:&nbsp;R$&nbsp;{fat_proj:,.0f}</div>
+        <div class="kpi-val">R$&nbsp;{brl(fat_total)}</div>
+        <div class="kpi-sub">Proj:&nbsp;R$&nbsp;{brl(fat_proj)}</div>
       </div>
       <div class="kpi-card">
         <div class="kpi-lbl">Clientes Ativos</div>
@@ -921,12 +930,12 @@ def _kpi_row_relatorio(fat_total, fat_proj, total_ativos, n_alto, n_medio,
       </div>
       <div class="kpi-card risco">
         <div class="kpi-lbl">Fat. em Risco</div>
-        <div class="kpi-val kpi-red">R$&nbsp;{fat_risco:,.0f}</div>
+        <div class="kpi-val kpi-red">R$&nbsp;{brl(fat_risco)}</div>
         <div class="kpi-sub">{fat_risco/fat_total*100:.1f}%&nbsp;da&nbsp;carteira</div>
       </div>
       <div class="kpi-card risco">
         <div class="kpi-lbl">Impacto vs. Mediana</div>
-        <div class="kpi-val kpi-red">-R$&nbsp;{impacto_total:,.0f}</div>
+        <div class="kpi-val kpi-red">-R$&nbsp;{brl(impacto_total)}</div>
         <div class="kpi-sub">por&nbsp;m&ecirc;s</div>
       </div>
       {f'''<div class="kpi-card destaque">
@@ -1009,12 +1018,12 @@ def _bloco_risco_relatorio(df_terr, nivel, label_acao, show_vendas=False, cfg=No
             <span style="font-size:10px;color:var(--suave)">{abs(vf):.0f}% abaixo da mediana{f" · {int(r['meses_queda'])}m em queda" if r['meses_queda'] > 0 else ""}</span>
           </td>
           {resp_cell}
-          <td style="font-weight:700">R$&nbsp;{r['mes_atual']:,.0f}</td>
-          <td style="color:var(--suave)">R$&nbsp;{fat_proj:,.0f}</td>
-          <td style="color:var(--suave)">R$&nbsp;{r['media_12m']:,.0f}</td>
+          <td style="font-weight:700">R$&nbsp;{brl(r['mes_atual'])}</td>
+          <td style="color:var(--suave)">R$&nbsp;{brl(fat_proj)}</td>
+          <td style="color:var(--suave)">R$&nbsp;{brl(r['media_12m'])}</td>
           <td class="{cor_vf}" style="font-weight:700">{vf:+.0f}%</td>
           <td style="color:var(--suave)">{int(r['meses_queda'])}m</td>
-          <td class="neg" style="font-weight:700">-R$&nbsp;{r['impacto_rs']:,.0f}</td>
+          <td class="neg" style="font-weight:700">-R$&nbsp;{brl(r['impacto_rs'])}</td>
         </tr>{sub_row}"""
 
     col_resp_th = "<th>Respons&aacute;vel</th>" if show_vendas else ""
@@ -1171,12 +1180,12 @@ def gerar_relatorio_gestor(df_ativos, mes_ref, cfg, modo_teste):
         bloq_s = f' <span class="st-bloq" style="font-size:9px">&#128683;&nbsp;{t_bloq}</span>' if t_bloq > 0 else ""
         linhas_terr += (
             f"<tr><td><strong style='color:var(--azul)'>{cod}</strong>&nbsp;{info['nome']}</td>"
-            f"<td style='font-weight:600'>R$&nbsp;{t['mes_atual'].sum():,.0f}"
-            f"<br><span style='font-size:10px;color:var(--suave)'>Proj:&nbsp;R$&nbsp;{t_fp:,.0f}</span></td>"
+            f"<td style='font-weight:600'>R$&nbsp;{brl(t['mes_atual'].sum())}"
+            f"<br><span style='font-size:10px;color:var(--suave)'>Proj:&nbsp;R$&nbsp;{brl(t_fp)}</span></td>"
             f"<td>{len(t)}{bloq_s}</td>"
             f"<td><span class='bdg bdg-alto'>{(t['risco']=='ALTO').sum()}</span>&nbsp;"
             f"<span class='bdg bdg-medio'>{(t['risco']=='MÉDIO').sum()}</span></td>"
-            f"<td class='neg' style='font-weight:700'>-R$&nbsp;{t_risco['impacto_rs'].sum():,.0f}</td>"
+            f"<td class='neg' style='font-weight:700'>-R$&nbsp;{brl(t_risco['impacto_rs'].sum())}</td>"
             f"<td style='color:var(--suave)'>{t_cas if t_cas > 0 else '—'}</td></tr>"
         )
 
@@ -1252,8 +1261,8 @@ def _corpo_simples(titulo, subtitulo, mes_ref, fat_total, fat_proj,
       <tr>
         <td style="padding:12px 14px;border-right:1px solid #d6eaf8;vertical-align:top">
           <div class="kpi-label">Faturamento {mes_ref}</div>
-          <div class="kpi-value">R$&nbsp;{fat_total:,.0f}</div>
-          <div class="kpi-sub">Proj:&nbsp;R$&nbsp;{fat_proj:,.0f}</div>
+          <div class="kpi-value">R$&nbsp;{brl(fat_total)}</div>
+          <div class="kpi-sub">Proj:&nbsp;R$&nbsp;{brl(fat_proj)}</div>
         </td>
         <td style="padding:12px 14px;border-right:1px solid #d6eaf8;vertical-align:top">
           <div class="kpi-label">Em Risco</div>
@@ -1265,12 +1274,12 @@ def _corpo_simples(titulo, subtitulo, mes_ref, fat_total, fat_proj,
         </td>
         <td style="padding:12px 14px;border-right:1px solid #d6eaf8;vertical-align:top">
           <div class="kpi-label">Fat. em Risco</div>
-          <div class="kpi-value" style="color:#c0392b">R$&nbsp;{fat_risco:,.0f}</div>
+          <div class="kpi-value" style="color:#c0392b">R$&nbsp;{brl(fat_risco)}</div>
           <div class="kpi-sub">{fat_risco/fat_total*100:.1f}%&nbsp;da&nbsp;carteira</div>
         </td>
         <td style="padding:12px 14px;vertical-align:top">
           <div class="kpi-label">Impacto vs.&nbsp;Mediana</div>
-          <div class="kpi-value" style="color:#c0392b">-R$&nbsp;{impacto:,.0f}</div>
+          <div class="kpi-value" style="color:#c0392b">-R$&nbsp;{brl(impacto)}</div>
           <div class="kpi-sub">por&nbsp;m&ecirc;s</div>
         </td>
       </tr>
@@ -1312,8 +1321,8 @@ def gerar_email_territorio(nome_resp, codigo, df_terr, mes_ref, cfg, modo_teste,
         st = _status_badge(r)
         top5_linhas += (
             f"<tr><td><strong>{r['Cliente']}</strong>{st}</td>"
-            f"<td>R$&nbsp;{r['mes_atual']:,.0f}</td>"
-            f"<td style='color:#c0392b;font-weight:700'>-R$&nbsp;{r['impacto_rs']:,.0f}</td></tr>"
+            f"<td>R$&nbsp;{brl(r['mes_atual'])}</td>"
+            f"<td style='color:#c0392b;font-weight:700'>-R$&nbsp;{brl(r['impacto_rs'])}</td></tr>"
         )
 
     return _corpo_simples(
@@ -1349,8 +1358,8 @@ def gerar_email_gestor(df_ativos, mes_ref, cfg, modo_teste, nome_arquivo=""):
         top5_linhas += (
             f"<tr><td><strong>{r['Cliente']}</strong>{st}"
             f"<br><small style='color:#9AA0A6'>{terr}&nbsp;{nome_r}</small></td>"
-            f"<td>R$&nbsp;{r['mes_atual']:,.0f}</td>"
-            f"<td style='color:#c0392b;font-weight:700'>-R$&nbsp;{r['impacto_rs']:,.0f}</td></tr>"
+            f"<td>R$&nbsp;{brl(r['mes_atual'])}</td>"
+            f"<td style='color:#c0392b;font-weight:700'>-R$&nbsp;{brl(r['impacto_rs'])}</td></tr>"
         )
 
     # Resumo de territórios como linhas extras
@@ -1366,12 +1375,12 @@ def gerar_email_gestor(df_ativos, mes_ref, cfg, modo_teste, nome_arquivo=""):
         linhas_terr += (
             f"<tr>"
             f"<td><strong style='color:#00B1D2'>{cod}</strong>&nbsp;{info['nome']}</td>"
-            f"<td style='font-weight:700'>R$&nbsp;{t['mes_atual'].sum():,.0f}"
-            f"<br><small style='color:#9AA0A6'>Proj:&nbsp;R$&nbsp;{t_fat_proj:,.0f}</small></td>"
+            f"<td style='font-weight:700'>R$&nbsp;{brl(t['mes_atual'].sum())}"
+            f"<br><small style='color:#9AA0A6'>Proj:&nbsp;R$&nbsp;{brl(t_fat_proj)}</small></td>"
             f"<td>{len(t)}{bloq_txt}</td>"
             f"<td><span class='badge badge-alto'>{(t['risco']=='ALTO').sum()}</span>"
             f"&nbsp;<span class='badge badge-medio'>{(t['risco']=='MÉDIO').sum()}</span></td>"
-            f"<td style='font-weight:700;color:#c0392b'>-R$&nbsp;{t_risco['impacto_rs'].sum():,.0f}</td>"
+            f"<td style='font-weight:700;color:#c0392b'>-R$&nbsp;{brl(t_risco['impacto_rs'].sum())}</td>"
             f"</tr>"
         )
 
@@ -1536,7 +1545,7 @@ def main():
         assunto = (
             f"{prefixo}[Churn Alert] {mes_ref.upper()} | "
             f"{cod} {info['nome']} | "
-            f"🔴 {n_alto} | 🟡 {n_medio} | R$ {impacto:,.0f} em risco"
+            f"🔴 {n_alto} | 🟡 {n_medio} | R$ {brl(impacto)} em risco"
         )
         nome_anexo  = f"Alerta_{cod}_{info['nome']}_{mes_ref.replace(' ','').upper()}.html"
         html_corpo  = gerar_email_territorio(info["nome"], cod, df_terr, mes_ref, cfg, modo_teste,
@@ -1553,7 +1562,7 @@ def main():
     em_risco_total = df_ativos[df_ativos["risco"].isin(["ALTO", "MÉDIO"])]
     assunto_gestor = (
         f"{prefixo}[Churn CONSOLIDADO] {mes_ref.upper()} | "
-        f"R$ {em_risco_total['impacto_rs'].sum():,.0f} em risco | "
+        f"R$ {brl(em_risco_total['impacto_rs'].sum())} em risco | "
         f"🔴 {(df_ativos['risco'] == 'ALTO').sum()} | "
         f"🟡 {(df_ativos['risco'] == 'MÉDIO').sum()}"
     )
