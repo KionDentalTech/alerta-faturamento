@@ -119,21 +119,86 @@ def mes_str_to_period(mes_str: str) -> pd.Period:
     return pd.Period(f"{p[1]}-{MESES_MAP[p[0]]:02d}", "M")
 
 
+def pascoa(ano: int) -> pd.Timestamp:
+    """Calcula data da Pascoa pelo algoritmo gregoriano anonimo."""
+    a = ano % 19; b = ano // 100; c = ano % 100
+    d = b // 4;   e = b % 4;      f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19*a + b - d - g + 15) % 30
+    i = c // 4;   k = c % 4
+    l = (32 + 2*e + 2*i - h - k) % 7
+    m = (a + 11*h + 22*l) // 451
+    month = (h + l - 7*m + 114) // 31
+    day   = ((h + l - 7*m + 114) % 31) + 1
+    return pd.Timestamp(ano, month, day)
+
+
+def feriados_brasil_sp(ano: int) -> list:
+    """
+    Retorna lista de feriados nacionais + SP/capital para o ano.
+    Inclui: nacionais fixos, Pascoa e moveis, Carnaval, Corpus Christi,
+    Aniversario de SP (25/jan) e Revolucao Constitucionalista (09/jul).
+    """
+    P = pascoa(ano)
+    datas = [
+        # ── Nacionais fixos ───────────────────────────
+        pd.Timestamp(ano,  1,  1),   # Confraternizacao Universal
+        pd.Timestamp(ano,  4, 21),   # Tiradentes
+        pd.Timestamp(ano,  5,  1),   # Dia do Trabalhador
+        pd.Timestamp(ano,  9,  7),   # Independencia
+        pd.Timestamp(ano, 10, 12),   # N. Sra. Aparecida
+        pd.Timestamp(ano, 11,  2),   # Finados
+        pd.Timestamp(ano, 11, 15),   # Proclamacao da Republica
+        pd.Timestamp(ano, 11, 20),   # Consciencia Negra
+        pd.Timestamp(ano, 12, 25),   # Natal
+        # ── Nacionais moveis ──────────────────────────
+        P - pd.Timedelta(days=48),   # Carnaval - Segunda
+        P - pd.Timedelta(days=47),   # Carnaval - Terca
+        P - pd.Timedelta(days=2),    # Sexta-feira Santa
+        P,                            # Pascoa
+        P + pd.Timedelta(days=60),   # Corpus Christi
+        # ── Sao Paulo (Estado + Capital) ──────────────
+        pd.Timestamp(ano,  1, 25),   # Aniversario de Sao Paulo
+        pd.Timestamp(ano,  7,  9),   # Revolucao Constitucionalista
+    ]
+    return [d for d in datas if d.year == ano]
+
+
+def _bdays_sem_feriados(start: pd.Timestamp, end: pd.Timestamp, feriados: list) -> int:
+    """Conta dias uteis (seg-sex) excluindo feriados, sem precisar de freq='C'."""
+    if end < start:
+        return 0
+    feriados_norm = set(f.normalize() for f in feriados)
+    return sum(1 for d in pd.bdate_range(start, end) if d.normalize() not in feriados_norm)
+
+
 def dias_uteis_mes(ano: int, mes: int) -> int:
-    """Total de dias uteis (seg–sex) no mes."""
+    """Total de dias uteis (seg-sex, excluindo feriados BR/SP) no mes."""
     inicio = pd.Timestamp(ano, mes, 1)
     fim    = inicio + pd.offsets.MonthEnd(0)
-    return len(pd.bdate_range(inicio, fim))
+    return _bdays_sem_feriados(inicio, fim, feriados_brasil_sp(ano))
 
 
 def dias_uteis_ate(ano: int, mes: int, ate: pd.Timestamp) -> int:
-    """Dias uteis decorridos do inicio do mes ate `ate` (inclusive)."""
-    inicio  = pd.Timestamp(ano, mes, 1)
-    fim_mes = inicio + pd.offsets.MonthEnd(0)
-    ate_clamped = min(ate, fim_mes)
+    """Dias uteis (excluindo feriados BR/SP) do inicio do mes ate `ate` (inclusive)."""
+    inicio      = pd.Timestamp(ano, mes, 1)
+    fim_mes     = inicio + pd.offsets.MonthEnd(0)
+    ate_clamped = min(pd.Timestamp(ate.date()), fim_mes)
     if ate_clamped < inicio:
         return 0
-    return len(pd.bdate_range(inicio, ate_clamped))
+    return _bdays_sem_feriados(inicio, ate_clamped, feriados_brasil_sp(ano))
+
+
+def ultimo_du_fechado(hoje: pd.Timestamp, feriados: list) -> pd.Timestamp:
+    """
+    Retorna o ultimo dia util COMPLETAMENTE FECHADO antes de hoje.
+    Sempre usa o dia anterior completo como base (nunca o dia atual parcial).
+    """
+    feriados_set = set(f.normalize() for f in feriados)
+    d = hoje.normalize() - pd.Timedelta(days=1)
+    while d.weekday() >= 5 or d in feriados_set:
+        d -= pd.Timedelta(days=1)
+    return d
 
 
 # ─────────────────────────────────────────────
@@ -400,11 +465,18 @@ def processar(df_cli, df_2025, df_2026, df_pedidos, cfg):
     df["meses_queda"]  = df.apply(lambda r: meses_consecutivos_queda(r, janela, mes_atual), axis=1)
     df["mes_ref"]      = mes_atual
 
-    # Projecao antecipada — necessaria para classificar risco corretamente
-    _periodo = mes_str_to_period(mes_atual)
+    # Projecao antecipada — baseada no ULTIMO DIA UTIL FECHADO (dia inteiro completo)
+    _periodo  = mes_str_to_period(mes_atual)
+    _feriados = feriados_brasil_sp(_periodo.year)
+    _ult_fu   = ultimo_du_fechado(hoje, _feriados)
     _du_total = dias_uteis_mes(_periodo.year, _periodo.month)
-    _du_dec   = dias_uteis_ate(_periodo.year, _periodo.month, hoje)
+    if _ult_fu.year == _periodo.year and _ult_fu.month == _periodo.month:
+        _du_dec = dias_uteis_ate(_periodo.year, _periodo.month, _ult_fu)
+    else:
+        _du_dec = 0
     _du_rest  = _du_total - _du_dec
+    logging.info(f"  Ultimo DU fechado: {_ult_fu.strftime('%d/%m/%Y')} | "
+                 f"DU decorridos: {_du_dec}/{_du_total} | Feriados {_periodo.year}: {len(_feriados)}")
     if _du_dec > 0:
         df["fat_projetado"] = (
             df["mes_atual"] + df["mes_atual"] / _du_dec * _du_rest
@@ -1510,9 +1582,12 @@ def gerar_email_territorio(nome_resp, codigo, df_terr, mes_ref, cfg, modo_teste,
     # acumulado do setor ÷ dias uteis decorridos × dias uteis restantes
     _periodo  = mes_str_to_period(mes_ref)
     _hoje     = SIM_DATE if SIM_DATE is not None else pd.Timestamp.now()
-    _du_total = dias_uteis_mes(_periodo.year, _periodo.month)
-    _du_dec   = dias_uteis_ate(_periodo.year, _periodo.month, _hoje)
-    _du_rest  = _du_total - _du_dec
+    _feriados_p = feriados_brasil_sp(_periodo.year)
+    _ult_fu_p   = ultimo_du_fechado(_hoje, _feriados_p)
+    _du_total   = dias_uteis_mes(_periodo.year, _periodo.month)
+    _du_dec     = dias_uteis_ate(_periodo.year, _periodo.month, _ult_fu_p) \
+                  if (_ult_fu_p.year == _periodo.year and _ult_fu_p.month == _periodo.month) else 0
+    _du_rest    = _du_total - _du_dec
     if _du_dec > 0:
         fat_proj = float(fat_total + fat_total / _du_dec * _du_rest)
     else:
@@ -1555,9 +1630,12 @@ def gerar_email_gestor(df_ativos, mes_ref, cfg, modo_teste, nome_arquivo=""):
     # Projecao consolidada no nivel da base
     _periodo  = mes_str_to_period(mes_ref)
     _hoje     = SIM_DATE if SIM_DATE is not None else pd.Timestamp.now()
-    _du_total = dias_uteis_mes(_periodo.year, _periodo.month)
-    _du_dec   = dias_uteis_ate(_periodo.year, _periodo.month, _hoje)
-    _du_rest  = _du_total - _du_dec
+    _feriados_g = feriados_brasil_sp(_periodo.year)
+    _ult_fu_g   = ultimo_du_fechado(_hoje, _feriados_g)
+    _du_total   = dias_uteis_mes(_periodo.year, _periodo.month)
+    _du_dec     = dias_uteis_ate(_periodo.year, _periodo.month, _ult_fu_g) \
+                  if (_ult_fu_g.year == _periodo.year and _ult_fu_g.month == _periodo.month) else 0
+    _du_rest    = _du_total - _du_dec
     if _du_dec > 0:
         fat_proj_tot = float(fat_total + fat_total / _du_dec * _du_rest)
     else:
