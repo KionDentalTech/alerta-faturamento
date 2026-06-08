@@ -11,3 +11,13 @@ saidas/
 __pycache__/
 *.pyc
 *.pyo
+
+# Claude Code internal
+.claude/
+
+# Node / docs
+docs/node_modules/
+docs/package-lock.json
+
+# Temp files do Word/Excel
+~$*
